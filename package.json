@@ -10,7 +10,9 @@
     "vendor": "node tools/vendor-pdfjs.mjs",
     "import": "node tools/vault.mjs import",
     "report": "node tools/vault.mjs report",
-    "icons": "node tools/make-icons.mjs"
+    "icons": "node tools/make-icons.mjs",
+    "build": "node tools/build-site.mjs",
+    "deploy": "npx --yes wrangler@4 deploy"
   },
   "devDependencies": {
     "pdfjs-dist": "6.4.299"
