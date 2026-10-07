@@ -21,3 +21,6 @@ tools/out/
 node_modules/
 .DS_Store
 .env
+
+# Old temporary passphrase file from the previous app
+pwa-temp-passphrase.txt
