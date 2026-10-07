@@ -25,6 +25,7 @@ input{font:inherit}
 canvas{display:block;max-width:100%}
 
 /* ── Lock screen ─────────────────────────── */
+[hidden]{display:none !important}
 .lock-screen{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
   background:linear-gradient(160deg,#0a84ff,#5e5ce6);padding:24px;z-index:60}
 .lock-card{background:var(--bg-elev);border-radius:28px;padding:36px 28px 28px;max-width:360px;width:100%;
