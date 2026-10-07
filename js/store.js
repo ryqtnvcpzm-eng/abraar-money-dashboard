@@ -54,11 +54,14 @@ export function chooseVault(remote, local) {
 
 // ---------- GitHub ----------
 export function guessRepo() {
-  const host = location.hostname;
-  const m = /^([^.]+)\.github\.io$/i.exec(host);
-  if (!m) return { owner: '', repo: '', branch: 'main' };
-  const seg = location.pathname.split('/').filter(Boolean)[0];
-  return { owner: m[1], repo: seg && !seg.includes('.') ? seg : `${m[1]}.github.io`, branch: 'main' };
+  const m = /^([^.]+)\.github\.io$/i.exec(location.hostname);
+  if (m) {
+    const seg = location.pathname.split('/').filter(Boolean)[0];
+    return { owner: m[1], repo: seg && !seg.includes('.') ? seg : `${m[1]}.github.io`, branch: 'main' };
+  }
+  // Other hosts (Cloudflare Pages, Netlify…): read <meta name="money-repo" content="owner/repo@branch">
+  const meta = /^([\w.-]+)\/([\w.-]+)(?:@([\w./-]+))?$/.exec(document.querySelector('meta[name="money-repo"]')?.content?.trim() || '');
+  return meta ? { owner: meta[1], repo: meta[2], branch: meta[3] || 'main' } : { owner: '', repo: '', branch: 'main' };
 }
 export function githubConfig() {
   try { return { ...guessRepo(), ...JSON.parse(ls.get(K.gh) || '{}') }; } catch { return guessRepo(); }

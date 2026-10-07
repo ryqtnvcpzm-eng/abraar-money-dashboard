@@ -1,6 +1,6 @@
 # Money
 
-A private, Apple-style finance app for your iPhone home screen. It's a static site on GitHub Pages: no server, no build step, nothing to run.
+A private, Apple-style finance app for your iPhone home screen. It's a static site you host for free on Cloudflare Pages (or GitHub Pages): no server, no build step, nothing to run.
 
 - **Overview**: balance with a Stocks-style chart you scrub with your finger, money in/out/net, and insight cards
 - **Spending**: by month, Everyday vs Everything, categories, monthly stacked chart, top merchants
@@ -13,6 +13,7 @@ A private, Apple-style finance app for your iPhone home screen. It's a static si
 ```
 index.html              app shell (CSP, icon sprite)
 manifest.webmanifest    install metadata
+_headers                security headers for Cloudflare Pages
 sw.js                   offline cache (bump VERSION after changing files)
 css/app.css             design system
 js/                     app code: crypto, parser, ledger, charts, views
@@ -33,11 +34,31 @@ docs/                   design notes and the vault JSON schema
 
 This code lives on the `claude/apple-finance-pwa` branch of `abraar-money-dashboard`. Merge it into `main` (open a pull request on GitHub and merge it, or `git checkout main && git merge claude/apple-finance-pwa && git push`).
 
-### 2. Decide public vs. private, and clean the history
+### 2. Host it for free on Cloudflare Pages (recommended)
 
-GitHub Pages on a **Free** plan needs a **public** repo. A private repo works with Pages on GitHub Pro, Team or Enterprise.
+Cloudflare Pages is free, works with a **private** repo (so the old history never goes public), and redeploys within about a minute whenever the repo changes, including when the app saves your vault.
 
-> ⚠️ This repo's earlier commits contain the old dashboard, with **monthly balances and totals in plain text**. Before making the repo public, publish a fresh history that starts from this version:
+1. Sign up at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up). It's free with no card needed.
+2. Go to **Workers & Pages → Create → Pages tab → Connect to Git.** If you only see a Workers option, look for the *"Looking to deploy Pages? Get started"* link.
+3. Connect GitHub. When asked which repositories to allow, pick **only `abraar-money-dashboard`**.
+4. Choose the repo and set up the build:
+   - **Production branch:** `main`
+   - **Framework preset:** `None`
+   - **Build command:** leave empty
+   - **Build output directory:** `/`
+5. Click **Save and Deploy**. Your app is live at `https://<project-name>.pages.dev`. Pick a project name that doesn't identify you, like `money-a7k`.
+
+The `_headers` file gives the site strict security headers (CSP, `noindex`, no framing). **Save to GitHub** already knows your repo from the `money-repo` tag in `index.html`, so each save commits there and Cloudflare redeploys.
+
+**Optional, but a strong extra layer: Cloudflare Access.** This puts an email login in front of the whole site, so strangers can't even download the encrypted file. It's free for up to 50 users:
+Zero Trust (left sidebar) → **Access → Applications → Add an application → Self-hosted**. Set the domain to your `*.pages.dev` address, add a policy *Allow → Emails → your email*, use the **One-time PIN** login, and set session duration to 1 month. On your iPhone you'll enter an emailed code about once a month, before the passphrase screen.
+
+<details>
+<summary>Alternative: GitHub Pages</summary>
+
+GitHub Pages on a **Free** plan needs a **public** repo (a private repo needs Pro, Team or Enterprise). Go to **Settings → Pages → Deploy from a branch → `main` / `(root)` → Save**. The site is at `https://<user>.github.io/<repo>/`.
+
+> ⚠️ This repo's earlier commits contain the old dashboard, with **monthly balances and totals in plain text**. Before making it public, publish a fresh history:
 >
 > ```bash
 > git checkout main && git pull
@@ -46,21 +67,16 @@ GitHub Pages on a **Free** plan needs a **public** repo. A private repo works wi
 > git push --force origin main
 > git push origin --delete claude/apple-finance-pwa   # old branches still carry the old history
 > ```
->
-> Or create a brand-new repository and push only this version to it.
+</details>
 
-### 3. Turn on GitHub Pages
-
-Go to **Settings → Pages → Build and deployment → Source: Deploy from a branch → Branch: `main` / `(root)` → Save.** After about a minute your app is at `https://<your-username>.github.io/<repo-name>/`.
-
-### 4. Create your vault and set your passphrase
+### 3. Create your vault and set your passphrase
 
 Open the site in Safari (on your phone or computer) and tap **Create Your Vault**. Choose a passphrase of at least 12 characters; four or more random words is ideal.
 
 - Your vault file is public, so **the passphrase is the only thing protecting it**. Don't reuse one.
 - **It can't be recovered.** Write it down somewhere safe, such as your password manager.
 
-### 5. Add your statements (Jan–Sep)
+### 4. Add your statements (Jan–Sep)
 
 **In the app (simplest):** tap **Add Statements**, choose all nine CIBC PDFs, and look over the reconciliation card for each month. A month reconciles when opening + deposits − withdrawals = closing and both totals match CIBC's summary to the cent. Then tap **Add 9 Statements**.
 
@@ -74,11 +90,11 @@ node tools/vault.mjs import statements/*.pdf  # asks for your passphrase, writes
 git add data/vault.enc.json && git commit -m "Add statements" && git push
 ```
 
-### 6. Save the encrypted file to the repo
+### 5. Save the encrypted file to the repo
 
 After the app adds statements, the updated vault is saved (encrypted) on that device. Use one of these to put it in the repo:
 
-- **One tap:** Settings → **GitHub Connection**. Paste a fine-grained token (see below), then tap **Save to GitHub**.
+- **One tap:** Settings → **GitHub Connection**. The repo is filled in already; paste a fine-grained token (see below), then tap **Save to GitHub**. Cloudflare redeploys about a minute later.
 - **By hand:** Settings → **Export Encrypted File**, then commit it as `data/vault.enc.json` (github.com → *Add file → Upload files* into `data/`).
 
 **Creating the token:** go to [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) and set:
@@ -89,17 +105,17 @@ After the app adds statements, the updated vault is saved (encrypted) on that de
 
 The token stays on that device only, encrypted with your passphrase, and is only ever sent to `api.github.com`.
 
-### 7. Set up your plan
+### 6. Set up your plan
 
 Open the **Plan** tab and tap **Set Up Plan**. Enter your employer, your start date, take-home pay, and your savings percentage. Money suggests a split of the spending budget (housing, groceries, restaurants, transport, misc, flex, coffee, gym) that you can edit line by line. The plan is stored inside the encrypted vault, not in the code.
 
-### 8. Install it on your iPhone
+### 7. Install it on your iPhone
 
 1. Open the site in **Safari**.
 2. Tap **Share** → **Add to Home Screen** → **Add**.
 3. Open **Money** from the home screen and unlock with your passphrase.
 
-The home-screen app has its own storage, separate from Safari's, so it loads the vault from your repo. Do step 6 first. It works offline after the first launch.
+The home-screen app has its own storage, separate from Safari's, so it loads the vault from your repo. Do step 5 first. It works offline after the first launch.
 
 ---
 

@@ -57,7 +57,8 @@ Anything else is flagged in red, and importing it needs an explicit *Import anyw
 | Phone left unlocked | Auto-lock after 1, 2, 5 or 15 minutes idle, and after more than a minute in the background. Locking drops the key and wipes the DOM. |
 | Malicious script | Strict CSP: `script-src 'self'`, `connect-src 'self' https://api.github.com`, no inline scripts, and pdf.js vendored rather than loaded from a CDN. Statement text is HTML-escaped everywhere. |
 | GitHub token theft | Optional. It's a fine-grained token for one repo with Contents read/write, stored in localStorage **encrypted with the vault key**. |
-| Search engines | `noindex, nofollow, noarchive` meta tags. |
+| Search engines | `noindex, nofollow, noarchive` meta tags, plus an `X-Robots-Tag` header on Cloudflare. |
+| Hosting | Cloudflare Pages from a private repo. `_headers` sends a real CSP with `frame-ancestors 'none'`, plus HSTS and nosniff. Optional Cloudflare Access email login puts even the ciphertext behind auth. |
 
 ## Files
 

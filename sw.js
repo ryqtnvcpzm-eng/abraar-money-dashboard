@@ -1,9 +1,9 @@
 // Service worker: makes Money open offline. Caches only this site's own files.
 // The encrypted vault is fetched network-first so new statements show up, with the cached copy as fallback.
 // Bump VERSION whenever app files change.
-const VERSION = 'money-v1.0.0';
+const VERSION = 'money-v1.0.1';
 const SHELL = [
-  './', 'index.html', 'manifest.webmanifest', 'css/app.css',
+  './', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/state.js', 'js/format.js', 'js/crypto.js', 'js/store.js', 'js/ui.js', 'js/charts.js',
   'js/categorize.js', 'js/cibc-parser.js', 'js/ledger.js', 'js/pdf-text.js', 'js/demo.js',
   'js/views/overview.js', 'js/views/spending.js', 'js/views/activity.js', 'js/views/plan.js',
@@ -48,8 +48,8 @@ self.addEventListener('fetch', (e) => {
   // App shell: cache first, refresh in the background.
   e.respondWith((async () => {
     const cache = await caches.open(VERSION);
-    const hit = await cache.match(req, { ignoreSearch: true }) || (req.mode === 'navigate' ? await cache.match('index.html') : null);
-    const net = fetch(req).then((res) => { if (res.ok && res.type === 'basic') cache.put(req, res.clone()); return res; }).catch(() => null);
+    const hit = await cache.match(req, { ignoreSearch: true }) || (req.mode === 'navigate' ? await cache.match('./') : null);
+    const net = fetch(req).then((res) => { if (res.ok && res.type === 'basic' && !res.redirected) cache.put(req, res.clone()); return res; }).catch(() => null);
     return hit || (await net) || new Response('Offline', { status: 503 });
   })());
 });
