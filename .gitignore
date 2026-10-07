@@ -1,0 +1,7 @@
+# Raw statements — NEVER commit
+*.pdf
+statements/
+# Local secrets
+pwa-temp-passphrase.txt
+*.local
+.DS_Store
