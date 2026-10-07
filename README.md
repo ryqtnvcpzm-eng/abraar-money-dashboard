@@ -13,7 +13,8 @@ A private, Apple-style finance app for your iPhone home screen. It's a static si
 ```
 index.html              app shell (CSP, icon sprite)
 manifest.webmanifest    install metadata
-_headers                security headers for Cloudflare Pages
+_headers                security headers (Cloudflare)
+wrangler.jsonc          Cloudflare deploy config (publishes dist/ only)
 sw.js                   offline cache (bump VERSION after changing files)
 css/app.css             design system
 js/                     app code: crypto, parser, ledger, charts, views
@@ -22,6 +23,7 @@ data/vault.enc.json     your data, encrypted (created by the app)
 vendor/pdfjs/           pdf.js, vendored so no code loads from a CDN
 icons/                  app icon + iPhone launch screens
 tools/vault.mjs         command-line check / import / report
+tools/build-site.mjs    copies the website files into dist/ for Cloudflare
 tests/                  parser + reconciliation + crypto tests
 docs/                   design notes and the vault JSON schema
 ```
@@ -34,24 +36,21 @@ docs/                   design notes and the vault JSON schema
 
 This code lives on the `claude/apple-finance-pwa` branch of `abraar-money-dashboard`. Merge it into `main` (open a pull request on GitHub and merge it, or `git checkout main && git merge claude/apple-finance-pwa && git push`).
 
-### 2. Host it for free on Cloudflare Pages (recommended)
+### 2. Host it for free on Cloudflare (recommended)
 
-Cloudflare Pages is free, works with a **private** repo (so the old history never goes public), and redeploys within about a minute whenever the repo changes, including when the app saves your vault.
+Cloudflare is free, works with a **private** repo (so the old history never goes public), and redeploys within about a minute whenever the repo changes, including when the app saves your vault.
 
 1. Sign up at [dash.cloudflare.com](https://dash.cloudflare.com/sign-up). It's free with no card needed.
-2. Go to **Workers & Pages → Create → Pages tab → Connect to Git.** If you only see a Workers option, look for the *"Looking to deploy Pages? Get started"* link.
-3. Connect GitHub. When asked which repositories to allow, pick **only `abraar-money-dashboard`**.
-4. Choose the repo and set up the build:
-   - **Production branch:** `main`
-   - **Framework preset:** `None`
-   - **Build command:** leave empty
-   - **Build output directory:** `/`
-5. Click **Save and Deploy**. Your app is live at `https://<project-name>.pages.dev`. Pick a project name that doesn't identify you, like `money-a7k`.
+2. Go to **Workers & Pages → Create → Import a repository**. Connect GitHub and allow **only `abraar-money-dashboard`**.
+3. Keep the defaults: production branch `main`, build command empty, deploy command `npx wrangler deploy`. Then click **Deploy**.
+4. Your app is live at `https://abraar-money-dashboard.<your-subdomain>.workers.dev`.
+
+`wrangler.jsonc` tells Cloudflare what to do. Before each deploy, it runs `tools/build-site.mjs`, which copies **only** the website files into `dist/` (an allowlist), so tooling, tests, `node_modules`, or a statement PDF accidentally left in the repo are never published.
 
 The `_headers` file gives the site strict security headers (CSP, `noindex`, no framing). **Save to GitHub** already knows your repo from the `money-repo` tag in `index.html`, so each save commits there and Cloudflare redeploys.
 
 **Optional, but a strong extra layer: Cloudflare Access.** This puts an email login in front of the whole site, so strangers can't even download the encrypted file. It's free for up to 50 users:
-Zero Trust (left sidebar) → **Access → Applications → Add an application → Self-hosted**. Set the domain to your `*.pages.dev` address, add a policy *Allow → Emails → your email*, use the **One-time PIN** login, and set session duration to 1 month. On your iPhone you'll enter an emailed code about once a month, before the passphrase screen.
+Zero Trust (left sidebar) → **Access → Applications → Add an application → Self-hosted**. Set the domain to your `*.workers.dev` address, add a policy *Allow → Emails → your email*, use the **One-time PIN** login, and set session duration to 1 month. On your iPhone you'll enter an emailed code about once a month, before the passphrase screen.
 
 <details>
 <summary>Alternative: GitHub Pages</summary>

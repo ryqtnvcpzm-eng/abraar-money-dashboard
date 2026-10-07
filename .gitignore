@@ -24,3 +24,8 @@ node_modules/
 
 # Old temporary passphrase file from the previous app
 pwa-temp-passphrase.txt
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars*
+dist/

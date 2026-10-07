@@ -1,0 +1,15 @@
+// Cloudflare deploy config (Workers static assets).
+// Before each deploy Wrangler runs tools/build-site.mjs, which copies only the
+// website files into dist/ — that folder is all that gets published.
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "abraar-money-dashboard",
+  "compatibility_date": "2026-10-06",
+  "build": { "command": "node tools/build-site.mjs" },
+  "assets": {
+    "directory": "./dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "observability": { "enabled": false }
+}
