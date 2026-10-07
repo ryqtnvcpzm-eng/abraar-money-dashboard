@@ -18,6 +18,8 @@ export function sanitizeDescription(s) {
     .replace(/\b(acct|account|compte|transit|branch|succursale|card|carte)\b\s*(no\.?|number|#)?\s*[:#]?\s*[\d\- ]{3,}/gi, ' ')
     .replace(/\b\d{2,5}-\d{3,}\b/g, ' ')
     .replace(/\b\d{5,}\b/g, ' ')
+    // Alphanumeric terminal/reference codes such as 3JM0QY020000 or R6846617 (7+ chars, 3+ digits, letters)
+    .replace(/\b(?=[A-Z0-9]*[A-Z])(?=(?:[A-Z]*\d){3})[A-Z0-9]{7,}\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -49,10 +51,19 @@ export function cleanName(description) {
     if (next === s) break;
     s = next;
   }
+  const truncated = s.trim().length >= 14 && s.trim().length <= 15; // CIBC cuts merchant names at 15 characters
   s = s
-    .replace(/^(SQ|TST|SP|PP|PAYPAL|GOOGLE|FS|IC|LS|CKO|DD|ZTL|PY)\s?\*\s?/i, '')
+    // Foreign-currency purchases end with "5000 JPY @ 0." / "1.39 CAD @ 1."
+    .replace(/\s+(?:[\d.,]+\s*)?[A-Z]{3}\s*@\s*[\d.]*\s*$/, '')
+    // Payment processors that put the merchant after them: "SQ *CAFE", "IC* INSTACART", "LS Time Out"
+    .replace(/^(SQ|TST|SP|PP|PAYPAL|GOOGLE|FS|IC|CKO|DD|ZTL|PY|VESTA)\s?\*\s?/i, '')
+    .replace(/^LS\s+/, '')
+    // "DISCORD* TEMPOR", "LYFT *TEMP AU": the merchant is before the asterisk
+    .replace(/^([A-Z0-9&'. -]{3,}?)\s?\*.*$/, '$1')
     .replace(/\s?\*\s?/g, ' ')
-    .replace(/#\s?\w+/g, ' ')
+    // CIBC cuts names at 15 characters: drop a dangling "(…" fragment
+    .replace(/\s*\([^)]*$/, '')
+    .replace(/#\s?\w*/g, ' ')
     .replace(/\b(NO|STORE|MAGASIN|SUCC)\.?\s?\d+\b/g, ' ')
     .replace(new RegExp(`\\b(${CITIES})\\b`, 'g'), ' ')
     .replace(new RegExp(`\\s(${PROVINCES})\\s*$`), ' ')
@@ -65,6 +76,14 @@ export function cleanName(description) {
     .trim()
     .replace(/[-–,.:;]+$/, '')
     .trim();
+  if (truncated && s.includes(' ')) {
+    // Drop the half-word CIBC's cut left behind ("NIKE CANADA MAR" -> "NIKE CANADA"), then trailing joiners.
+    const words = s.split(' ');
+    const last = words[words.length - 1];
+    if (last.length <= 3 && !KEEP_UPPER.has(last)) words.pop();
+    while (words.length > 1 && (SMALL_WORDS.has(words[words.length - 1].toLowerCase()) || /^[-–&]$/.test(words[words.length - 1]))) words.pop();
+    s = words.join(' ');
+  }
   if (!s) {
     // Only a transaction type (e.g. "SERVICE CHARGE"): use the type itself.
     const m = PREFIX_RE.exec(typeOnly);

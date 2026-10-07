@@ -49,7 +49,7 @@ export function openImporter({ welcome = false } = {}) {
         ${icon('plus')} ${items.length ? 'Choose More PDFs' : 'Choose PDFs'}
         <input type="file" accept="application/pdf,.pdf" multiple hidden id="imp-file">
       </label>
-      <div id="imp-items">${items.map(card).join('')}</div>
+      <div id="imp-items">${items.map((it, i) => [it, i]).sort((a, b) => (a[0].prep?.id || '9999').localeCompare(b[0].prep?.id || '9999')).map(([it, i]) => card(it, i)).join('')}</div>
       ${items.length ? `<div class="btn-row" style="position:sticky;bottom:0;padding:12px 0 4px;background:linear-gradient(transparent,var(--sheet-bg) 30%)">
         <button class="btn" data-act="commit" ${ready.length ? '' : 'disabled'}>${ready.length ? `Add ${plural(ready.length, 'Statement')}` : 'Nothing to add yet'}</button></div>` : ''}
       <p class="list-foot">Each statement is checked: opening balance + deposits − withdrawals must equal the closing balance, and totals must match the bank’s summary. Reversals and waived fees are netted out automatically.</p>`);

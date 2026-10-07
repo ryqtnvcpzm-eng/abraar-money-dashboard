@@ -32,6 +32,11 @@ await test('clean names', () => {
   assert.equal(cleanName('VISA DEBIT RETAIL PURCHASE SQ *CAFE OLIMPICO'), 'Cafe Olimpico');
   assert.equal(cleanName('E-TRANSFER 105123456789 Sample Person'), 'Sample Person');
   assert.equal(cleanName('SERVICE CHARGE'), 'Service Charge');
+  assert.equal(cleanName('RETAIL PURCHASE NIKE CANADA MAR'), 'Nike Canada');
+  assert.equal(cleanName('RETAIL PURCHASE 3JM0QY020000 LS Time Out Le'), 'Time Out');
+  assert.equal(cleanName('INTL VISA DEB RETAIL PURCHASE MOBILE SUICA AP 5000 JPY @ 0.'), 'Mobile Suica Ap');
+  assert.equal(cleanName('INTL VISA DEB RETAIL PURCHASE DISCORD* TEMPOR 0.99 USD @ 1.'), 'Discord');
+  assert.equal(cleanName('RETAIL PURCHASE SHAWARMAZ (DOWN'), 'Shawarmaz');
 });
 await test('rules categorize common merchants', () => {
   const c = (merchant, amount = -5) => categorize({ merchant, amount }, compiled, []).category;
@@ -46,6 +51,9 @@ await test('rules categorize common merchants', () => {
   assert.equal(c('INTERNET BILL PAY FIZZ'), 'bills');
   assert.equal(c('VISA DEBIT PURCHASE APPLE.COM/BILL'), 'entertainment');
   assert.equal(c('VISA DEBIT PURCHASE BANANA REPUBLIC'), 'other');
+  assert.equal(c('DEPOSIT TPS/GST', 120), 'transfer_in');
+  assert.equal(c('VISA DEBIT RETAIL PURCHASE AIR CAN*'), 'travel');
+  assert.equal(c('VISA DEBIT RETAIL PURCHASE IC* INSTACART'), 'groceries');
 });
 await test('user rules beat rules.json, and locked choices beat both', () => {
   const t = { merchant: 'RETAIL PURCHASE COUCHE-TARD #2', amount: -3 };
