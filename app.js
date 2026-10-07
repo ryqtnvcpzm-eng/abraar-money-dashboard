@@ -689,7 +689,7 @@ window.addEventListener('resize', () => { if (passphrase) { drawBalanceChart(); 
 (async function init() {
   try { rules = await (await fetch('rules.json')).json(); } catch { rules = { categories: [], merchantRules: [], cleanNames: [] }; }
   if ('serviceWorker' in navigator) {
-    try { await navigator.serviceWorker.register('sw.js?v=4'); } catch (e) { /* offline support optional */ }
+    try { await navigator.serviceWorker.register('sw.js?v=5'); } catch (e) { /* offline support optional */ }
   }
   setTimeout(() => $('#passInput').focus(), 300);
 })();

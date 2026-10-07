@@ -14,7 +14,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
 
@@ -43,6 +43,17 @@
     </div>
   </header>
 
+
+  <aside class="side-bar" aria-label="Main">
+    <div class="side-brand"><span class="side-emoji">💰</span> Abraar&nbsp;Money</div>
+    <nav class="side-nav">
+      <button class="tab-btn side-btn active" data-tab="overview"><span class="tab-ico">🏠</span><span>Overview</span></button>
+      <button class="tab-btn side-btn" data-tab="spending"><span class="tab-ico">📊</span><span>Spending</span></button>
+      <button class="tab-btn side-btn" data-tab="activity"><span class="tab-ico">🧾</span><span>Activity</span></button>
+      <button class="tab-btn side-btn" data-tab="plan"><span class="tab-ico">🎯</span><span>Plan</span></button>
+    </nav>
+    <div class="side-foot">AES-256 encrypted<br>On-device only</div>
+  </aside>
   <main id="mainScroll" class="main-scroll">
     <!-- OVERVIEW -->
     <section class="tab-page" id="page-overview">
@@ -144,6 +155,6 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>
