@@ -121,19 +121,12 @@ $('#unlockForm').addEventListener('submit', async (e) => {
 });
 function enterApp() {
   rebuildTxs();
-  $('#lockScreen').hidden = true;
+  const ls = $('#lockScreen'); if (ls) ls.remove();
   $('#app').hidden = false;
   renderAll();
   resetLockTimer();
 }
-function lockApp() {
-  passphrase = null; baseData = null; txs = [];
-  $('#passInput').value = '';
-  $('#app').hidden = true;
-  $('#lockScreen').hidden = false;
-  closeSheet();
-  setTimeout(() => $('#passInput').focus(), 80);
-}
+function lockApp() { location.reload(); }
 $('#lockNowBtn').addEventListener('click', lockApp);
 function resetLockTimer() {
   clearTimeout(lockTimer);

@@ -1,7 +1,7 @@
 // Service worker — cache-first app shell so the app opens offline.
 // data.enc.json is NETWORK-FIRST on purpose: passphrase changes must take
 // effect immediately and never be served stale from cache.
-const CACHE = 'abraar-money-v2';
+const CACHE = 'abraar-money-v3';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './rules.json',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
