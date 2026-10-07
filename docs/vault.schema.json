@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vault.schema.json",
+  "title": "Money vault (decrypted contents of data/vault.enc.json)",
+  "description": "This is the plaintext shape that only ever exists in memory on your device. The repo holds it AES-256-GCM encrypted. No account, card or transit numbers are ever stored.",
+  "type": "object",
+  "required": ["schema", "statements", "transactions"],
+  "properties": {
+    "schema": { "const": 1 },
+    "account": {
+      "type": "object",
+      "properties": {
+        "bank": { "type": "string", "examples": ["CIBC"] },
+        "name": { "type": "string", "examples": ["Chequing"] },
+        "currency": { "const": "CAD" }
+      }
+    },
+    "statements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "start", "end", "opening", "closing", "reconciled"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^\\d{4}-\\d{2}$", "description": "Statement month (YYYY-MM of the period end)" },
+          "start": { "type": "string", "format": "date" },
+          "end": { "type": "string", "format": "date" },
+          "opening": { "type": "number", "description": "Opening balance printed on the statement" },
+          "closing": { "type": "number", "description": "Closing balance printed on the statement" },
+          "withdrawals": { "type": "number", "description": "Sum of extracted withdrawals" },
+          "deposits": { "type": "number", "description": "Sum of extracted deposits" },
+          "count": { "type": "integer" },
+          "reconciled": { "type": "boolean", "description": "opening + deposits − withdrawals = closing, and both totals match the bank's summary to the cent" },
+          "checks": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "statement": { "type": ["number", "null"] }, "computed": { "type": "number" }, "ok": { "type": ["boolean", "null"] } } } },
+          "issues": { "type": "array", "items": { "type": "string" } },
+          "importedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "transactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "date", "merchant", "name", "amount", "category", "statement"],
+        "properties": {
+          "id": { "type": "string", "examples": ["2026-09-014"] },
+          "date": { "type": "string", "format": "date" },
+          "merchant": { "type": "string", "description": "Statement description, with reference/card/account numbers removed", "examples": ["RETAIL PURCHASE COUCHE-TARD #212"] },
+          "name": { "type": "string", "description": "Clean merchant name", "examples": ["Couche-Tard"] },
+          "amount": { "type": "number", "description": "Signed dollars: negative = money out, positive = money in" },
+          "category": { "type": "string", "description": "A category id from data/rules.json" },
+          "statement": { "type": "string", "description": "Statement month this came from (YYYY-MM)" },
+          "balance": { "type": "number", "description": "Running balance printed beside it, when CIBC prints one" },
+          "locked": { "type": "boolean", "description": "Category chosen by hand for this one transaction" },
+          "oneOff": { "type": "boolean", "description": "Excluded from Everyday spending" }
+        }
+      }
+    },
+    "userRules": {
+      "type": "array",
+      "description": "Rules saved with 'Apply to all from this merchant'. They beat data/rules.json.",
+      "items": { "type": "object", "required": ["name", "category"], "properties": { "name": { "type": "string" }, "category": { "type": "string" }, "sign": { "enum": [-1, 1] }, "createdAt": { "type": "string" } } }
+    },
+    "plan": {
+      "type": ["object", "null"],
+      "properties": {
+        "employer": { "type": "string" },
+        "start": { "type": "string", "format": "date" },
+        "takeHome": { "type": "number" },
+        "savePct": { "type": "number" },
+        "eatingOut": { "type": "array", "items": { "type": "string" } },
+        "lines": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "amount": { "type": "number" }, "categories": { "type": "array", "items": { "type": "string" } } } } }
+      }
+    },
+    "settings": { "type": "object", "properties": { "autoLockMinutes": { "type": "integer" } } }
+  }
+}

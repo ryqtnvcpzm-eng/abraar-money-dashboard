@@ -1,7 +1,26 @@
-# Raw statements — NEVER commit
+# Raw bank statements must never be committed (the site is public).
 *.pdf
+*.PDF
 statements/
-# Local secrets
-pwa-temp-passphrase.txt
-*.local
+Statements/
+raw/
+
+# Plain-text financial data exports — only data/vault.enc.json (encrypted) belongs in the repo.
+*.csv
+*.xlsx
+*.ofx
+*.qfx
+data/*.json
+!data/rules.json
+!data/vault.enc.json
+*.plain.json
+*.decrypted.json
+tools/out/
+
+# Tooling
+node_modules/
 .DS_Store
+.env
+
+# Old temporary passphrase file from the previous app
+pwa-temp-passphrase.txt
