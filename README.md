@@ -2,9 +2,9 @@
 
 A private, Apple-style finance app for your iPhone home screen. It's a static site plus a tiny sync API, hosted for free on Cloudflare Workers: no framework, no bundler, nothing to run.
 
-- **Overview**: balance with a Stocks-style chart you scrub with your finger, money in/out/net, and insight cards
+- **Overview**: balance with a Stocks-style chart you scrub with your finger, money in/out/net, and insights that dig into your data: possible double charges, where this month is heading, subscriptions and bills (with price rises and what's due next), unusual charges, how much of what comes in you keep, Amazon by what you actually bought, and more
 - **Spending**: by month, Everyday vs Everything, categories, monthly stacked chart, top merchants
-- **Activity**: every transaction, searchable. Re-categorize one, or apply the change to all from a merchant (saved as a rule).
+- **Activity**: every transaction, searchable. Re-categorize one, apply the change to all from a merchant (saved as a rule), or split one charge across categories.
 - **Plan**: budget from your start date, with Saved / Spent / Eating-out rings and budget vs actual
 - **Add Statement**: reads statements from any bank on your device (PDF, or the CSV, OFX/QFX or QIF file online banking lets you download), removes duplicates, categorizes, and reconciles to the bank's balances
 - **Accounts**: share the link with family. Everyone gets their own private account with every feature, synced across their iPhone and Mac.
@@ -160,12 +160,42 @@ Duplicates are skipped automatically, even across a PDF and a CSV of the same mo
 - **Automatic, for any bank in the world.** Money categorises on your device, in this order:
   1. the kind of transaction (pay, fees, transfers, cash withdrawals, investing apps), in many languages;
   2. a merchant category code (MCC) when the bank prints one;
-  3. about 900 chains and brands from around the world (Tesco, Kroger, Carrefour, REWE, Swiggy, Woolworths, Lawson, Talabat…);
+  3. about 1,000 chains and brands from around the world (Tesco, Kroger, Carrefour, REWE, Swiggy, Woolworths, Lawson, Talabat…);
   4. everyday words in many languages ("pharmacie", "supermercado", "Tankstelle", "ristorante");
   5. your own choices: tagging "Blue Heron" once also covers "Blue Heron Main St" and "Blue Heron Airport".
 
+  Product names (from an Amazon order history) are sorted with their own list of about 580 everyday product words.
+
   The merchant named first in the description wins, so "BOUSTAN MCGILL" is a restaurant, and a place name on its own (McGill, "University") only counts when nothing else matches. Cafés, transit and restaurants paid in a foreign currency count as **Travel**. On a test set of 173 descriptions from 20+ countries it gets every one right, and `npm test` checks that.
 - **In `data/rules.json`:** the built-in categories (name, color, icon, whether it counts as *Everyday*) and merchant patterns (case-insensitive regex). Rules marked `"stage": "type"` are checked first, in order; `"weak": true` rules only apply when no other merchant rule matches. This file is public, so keep it to generic merchant names. Never put people's names or amounts in it.
+
+## Insights
+
+Overview ranks what's worth knowing and shows the top dozen as swipeable cards (**See All** lists them). Tap one for the full story: charts, the numbers behind it and the transactions.
+
+| Card | What it tells you |
+|---|---|
+| **Possible double charge** | The same amount at the same place twice within a day, in the last 60 days. Places where that's normal for you (two transit fares) are left out. Tap **Both Were Real** to dismiss it. |
+| **This month so far** | Everyday spending by today's date against the same point in your earlier months, and where the month ends if the rest goes as usual. Which categories are running ahead. |
+| **Price went up** | A subscription or bill that now charges more, with the extra per year. |
+| **Coming up** | Bills and subscriptions due in the next two weeks, from when each charged before. |
+| **Bills & subscriptions** | Everything that charges on a schedule (weekly to yearly), split into subscriptions, bills and other regulars, with next dates, monthly and yearly cost, and the ones that stopped. Rent sent by e-transfer counts when it's the same amount each month. |
+| **Unusual charge** | A charge far above what you usually pay at that place, or your biggest ever in a category. Mark it as a one-off if it was planned. |
+| **Money in vs out** | How much of what comes in you keep, month by month. Moves between your own accounts don't count. |
+| **Safety net** | How many months your balance would cover your usual spending. |
+| **Amazon** | What your Amazon money went on, by category, once you add your order history (below). |
+| **Weekends, Small buys add up, Bank fees** | Weekend days against weekdays, purchases under $15 that add up, and fees you could ask to have waived. |
+| **Most visited, Everyday spending, Biggest month, Balance, a category that moved, Plan, Eating out** | As before. |
+
+Everything is worked out on your device from the decrypted vault.
+
+## Amazon, Costco and other stores that sell everything
+
+A statement only says "Amazon", but one order can be groceries and the next a phone. Money handles it three ways:
+
+1. **The descriptor, when it says more.** Prime and Prime Video, Kindle, Audible and Amazon Music go to *Subscriptions & Fun*, Amazon Fresh and Whole Foods to *Groceries*, Amazon Pharmacy to *Health*. Plain Amazon purchases start as *Shopping*.
+2. **Your Amazon order history** (best). On Amazon go to **Account → Request Your Data**, choose **Your Orders**, and add the zip Amazon emails you (Settings → **Amazon Orders**, or drop it on Add Statement). Money groups items into the shipments Amazon charges for, matches each to its charge by exact amount and date, and files every item by what it is: a phone case under *Electronics & Tech*, coffee under *Groceries*, paper towels under *Home & Household*. An order with both is **split**, so each part counts in its own category while Activity still shows one charge. Refunds go back to the category of the item returned. The file is read on your device; only item names, prices, dates and categories are kept, inside the encrypted vault. Addresses, order numbers, payment and tracking details are ignored. Shipments that don't match yet (a statement you haven't added) are kept for a year and sorted when that statement arrives.
+3. **By hand, in one tap.** Tap a charge at Amazon, Walmart, Costco, Canadian Tire or Dollarama and pick **What was it?** (this charge only; a category change at these stores defaults to *Only This One*), or **Split Across Categories** to divide it. Splitting works for any purchase.
 
 ## Security notes
 

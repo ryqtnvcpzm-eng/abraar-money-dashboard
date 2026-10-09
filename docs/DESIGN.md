@@ -14,9 +14,9 @@ Money is a home-screen web app that should feel like Apple built it. This page c
 
 | Tab | What you see |
 |---|---|
-| **Overview** | Big balance. A daily balance chart you scrub with a finger, as in Stocks: the header shows the date and balance under your finger, and you feel a tap at each month boundary. Range picker: 1M · 3M · 6M · YTD · ALL. Money in / out / net for the range. Swipeable insight cards written from your data (most visited merchant, everyday average versus plan, biggest month, balance trend, a category that moved, plan countdown, eating out). Statement health. |
+| **Overview** | Big balance. A daily balance chart you scrub with a finger, as in Stocks: the header shows the date and balance under your finger, and you feel a tap at each month boundary. Range picker: 1M · 3M · 6M · YTD · ALL. Money in / out / net for the range. Swipeable insight cards, ranked by how much they matter (possible double charge, this month's pace, price rises, bills coming up, bills and subscriptions, unusual charges, money in vs out, safety net, Amazon by category, weekends, small buys, bank fees, plus most visited, everyday average, biggest month, balance trend, a category that moved, plan countdown and eating out); See All lists them, and each opens a detail sheet. Statement health. |
 | **Spending** | Month pager (‹ September 2026 ›, or tap for a list including All Months). Everyday / Everything toggle. Total versus average, a stacked color bar, then categories with counts and shares. Tap a category for a sheet with its monthly columns and transactions. Monthly stacked columns (tap a month to jump to it). Top merchants with visit counts. |
-| **Activity** | Search (merchant, category, amount, month) plus filter chips (Money Out, Money In, One-offs, Reversed). Grouped by day with day totals. Tap a transaction to change its category; Money offers **Apply to all N from this merchant** and saves that as a rule. One-off switch. |
+| **Activity** | Search (merchant, category, amount, month) plus filter chips (Money Out, Money In, One-offs, Reversed). Grouped by day with day totals. Tap a transaction to change its category; Money offers **Apply to all N from this merchant** and saves that as a rule (at stores that sell everything, *Only This One* comes first). One-off switch. **Split** divides a charge between categories; a split charge stays one row here. |
 | **Plan** | From your start date: Apple Watch-style rings for **Saved** (green), **Spent** (red) and **Eating out** (cyan), the Fitness palette on a black card. Take-home, save percentage and spend pills. Budget against actual for every line, with green, orange or red bars and amount left or over. Month history. Before the start date, it previews the plan against your latest full month. |
 
 Settings, the importer and every drill-down are bottom sheets. On a phone the app behind recedes like an iOS card stack. On desktop (1000px and wider) the tab bar becomes a glass sidebar, content sits in a 760px column, and sheets become centered form sheets.
@@ -24,6 +24,10 @@ Settings, the importer and every drill-down are bottom sheets. On a phone the ap
 ## Categories and "Everyday"
 
 Categories live in `data/rules.json`, and each has `everyday: true/false`. **Everyday** leaves out tuition, travel, immigration and government, money sent to people, and anything you switch to *One-off*. **Everything** counts all spending except moves between your own accounts. Refunds reduce their category. Reversals, corrections and waived fees are paired with the transaction they undo and left out of totals entirely, so *net = balance change* holds for every month.
+
+## Split charges
+
+A raw transaction can carry `parts` (split by hand) or `items` (from an Amazon order history). `buildModel` turns it into one model row per category (`id~k`, `partOf`), scaled so the parts add up to the charge to the cent, so every total, chart, budget and insight counts each part in its own category with no special cases. The whole charge is also in `byId` (with `split`) for Activity, which shows it as one row, and for the transaction sheet. A refund of the whole charge nets out all its parts; a refund of one item nets out that part.
 
 ## Data pipeline
 
@@ -87,6 +91,7 @@ On the synthetic CIBC statements the general reader produces exactly the same tr
 - `js/app.js`: boot, lock/unlock, auto-lock, tabs; `js/state.js` holds in-memory state
 - `js/crypto.js`: WebCrypto vault format; `js/store.js` handles repo, account and local copies, the GitHub API and export
 - `js/cloud.js`: account sign-up, sign-in and sync client; `worker/index.js`: the sync API (Cloudflare Worker + D1)
+- `js/analysis.js`: recurring charges, pace, unusual and double charges, cash flow and the rest of the insights' maths; `js/amazon.js`: reads Amazon's order-history zip/CSV and matches shipments to charges
 - `js/statements.js` (one entry point for every file), `js/cibc-parser.js`, `js/generic-parser.js`, `js/file-formats.js`, `js/parse-util.js`, `js/pdf-text.js`, `js/categorize.js`, `js/ledger.js`: pure logic shared with the Node tools and tests
 - `js/ui.js` (sheets, alerts, haptics) and `js/charts.js` (balance scrubber, stacked columns, rings)
 - `js/views/*`: one file per tab plus sheets, the importer and settings

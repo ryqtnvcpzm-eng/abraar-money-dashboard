@@ -15,7 +15,7 @@ export function uncategorized(model = app.model) {
   const ruled = new Set((app.vault?.userRules || []).map((r) => `${r.name.toLowerCase()}|${r.sign ?? ''}`));
   const map = new Map();
   for (const t of model.txns) {
-    if (t.cat?.id !== 'other' || t.c >= 0 || t.netted || t.locked) continue;
+    if (t.cat?.id !== 'other' || t.c >= 0 || t.netted || t.locked || t.partOf) continue;
     if (ruled.has(`${t.name.toLowerCase()}|-1`) || ruled.has(`${t.name.toLowerCase()}|`)) continue;
     const e = map.get(t.name) || { name: t.name, sign: -1, count: 0, cents: 0, last: t.date };
     e.count++;

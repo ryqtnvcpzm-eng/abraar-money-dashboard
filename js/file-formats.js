@@ -25,7 +25,7 @@ export function sniff(name, text) {
 // CSV / TSV
 // ---------------------------------------------------------------------------
 
-function splitRows(text, delim) {
+export function splitRows(text, delim) {
   const rows = [];
   let row = [], cell = '', q = false;
   for (let i = 0; i < text.length; i++) {
@@ -43,7 +43,7 @@ function splitRows(text, delim) {
   return rows.map((r) => r.map((c) => c.trim())).filter((r) => r.some((c) => c !== ''));
 }
 
-function detectDelimiter(text) {
+export function detectDelimiter(text) {
   const lines = text.split(/\r?\n/).filter((l) => l.trim()).slice(0, 30);
   let best = ',', bestScore = -1;
   for (const d of [',', ';', '\t', '|']) {

@@ -8,8 +8,12 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { pdfToPages } from '../js/pdf-text.js';
 import { parseCibcStatement, reconcile, parseSummary } from '../js/cibc-parser.js';
-import { compileRules, cleanName, sanitizeDescription, categorize } from '../js/categorize.js';
-import { emptyVault, prepareImport, commitImport, buildModel, flow, spendByCategory, dailyBalance, planFromTemplate, planTargets, insights } from '../js/ledger.js';
+import { compileRules, cleanName, sanitizeDescription, categorize, productCategory, isMixedStore } from '../js/categorize.js';
+import { emptyVault, prepareImport, commitImport, buildModel, flow, spendByCategory, dailyBalance, planFromTemplate, planTargets, insights, splitParts } from '../js/ledger.js';
+import { recurring, upcoming, duplicates, pace, unusual, cashflow } from '../js/analysis.js';
+import { readOrderFiles, applyOrders, matchWaiting, _test as _amz } from '../js/amazon.js';
+import { toCents } from '../js/format.js';
+import { deflateRawSync } from 'node:zlib';
 import { createSession, seal, open } from '../js/crypto.js';
 import { scanDate, parseMoney, resolveOrder } from '../js/parse-util.js';
 import { parseGenericStatement } from '../js/generic-parser.js';
@@ -215,6 +219,250 @@ await test('re-importing part of a month never deletes the rest', () => {
 await test('a scanned PDF (no text) gets a helpful message', async () => {
   const fakePdf = { getDocument: () => ({ promise: Promise.resolve({ numPages: 1, getPage: async () => ({ getTextContent: async () => ({ items: [] }), cleanup() {} }) }), destroy: async () => {} }) };
   await assert.rejects(loadFile({ name: 'scan.pdf', bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }, { pdfjs: fakePdf }), /scanned image/);
+});
+
+console.log('Insights');
+// A small made-up ledger: one account, months of everyday life, plus the patterns the insights look for.
+function lifeVault({ months = 6, extra = () => {} } = {}) {
+  const v = emptyVault();
+  let n = 0;
+  for (let k = 1; k <= months; k++) {
+    const ym = `2026-${String(k).padStart(2, '0')}`;
+    const last = new Date(2026, k, 0).getDate();
+    const add = (d, merchant, amount) => v.transactions.push({ id: `${ym}-t-${String(++n).padStart(3, '0')}`, date: `${ym}-${String(d).padStart(2, '0')}`, merchant, name: '', amount, category: 'other', statement: ym });
+    add(1, 'PREAUTHORIZED DEBIT SAMPLE PROPERTY MGMT', -1200);
+    add(4, 'INTERNET BILL PAY FIZZ', -40.24);
+    add(6, 'VISA DEBIT PURCHASE NETFLIX.COM', k < 4 ? -16.49 : -18.99);
+    add(15, 'PAYROLL DEPOSIT EXAMPLE CORP', 2500);
+    for (let d = 2; d <= 26; d += 3) add(d, 'RETAIL PURCHASE COUCHE-TARD', -4.25);
+    for (let d = 3; d <= 27; d += 6) add(d, 'VISA DEBIT PURCHASE PROVIGO', -Math.round((48.1 + d + k * 3.17) * 100) / 100);
+    add(20, 'E-TRANSFER Sample Roommate', -300);
+    extra(add, k, ym, last);
+    v.statements.push({ id: ym, start: `${ym}-01`, end: `${ym}-${last}`, opening: 1000, closing: 1000 });
+  }
+  v.transactions.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1));
+  return v;
+}
+
+await test('recurring charges: subscriptions, bills, rent by e-transfer, and price changes', () => {
+  const m = buildModel(lifeVault(), compiled);
+  const rec = recurring(m);
+  const by = (name) => rec.find((r) => r.name === name);
+  assert.equal(by('Netflix')?.cadence.id, 'monthly');
+  assert.equal(by('Netflix').kind, 'subscription');
+  assert.deepEqual([by('Netflix').change.from, by('Netflix').change.to, by('Netflix').change.date], [1649, 1899, '2026-04-06']);
+  assert.equal(by('Netflix').next, '2026-07-06');
+  assert.equal(by('Fizz')?.kind, 'bill');
+  assert.ok(by('Sample Roommate'), 'same e-transfer every month is a regular');
+  assert.ok(!by('Couche-Tard'), 'a regular coffee is a habit, not a subscription');
+  assert.ok(!by('Provigo'), 'groceries of varying amounts are not recurring');
+});
+
+await test('upcoming bills only when the data is recent', () => {
+  const m = buildModel(lifeVault(), compiled);
+  const soon = upcoming(m, '2026-07-02');
+  assert.ok(soon.some((r) => r.name === 'Fizz' && r.due === '2026-07-04'));
+  assert.equal(upcoming(m, '2027-03-01').length, 0);
+});
+
+await test('double charges are flagged, habits and dismissed ones are not', () => {
+  const v = lifeVault({ extra: (add, k) => { if (k === 6) { add(12, 'VISA DEBIT PURCHASE SPORT CHEK', -64.99); add(12, 'VISA DEBIT PURCHASE SPORT CHEK', -64.99); } } });
+  const m = buildModel(v, compiled);
+  const d = duplicates(m);
+  assert.equal(d.length, 1);
+  assert.equal(d[0].a.name, 'Sport Chek');
+  assert.equal(duplicates(buildModel(v, compiled), [d[0].key]).length, 0);
+  // Two transit fares a day, every day: normal.
+  const v2 = lifeVault({ extra: (add) => { for (const d of [3, 5, 9]) { add(d, 'RETAIL PURCHASE STM METRO', -25); add(d, 'RETAIL PURCHASE STM METRO', -25); } } });
+  assert.equal(duplicates(buildModel(v2, compiled)).length, 0);
+});
+
+await test('pace of an unfinished month, unusual charges, money in vs out', () => {
+  const v = lifeVault({ extra: (add, k) => { if (k === 6) add(10, 'VISA DEBIT PURCHASE PROVIGO', -480); } });
+  // July so far: only the first 10 days.
+  v.transactions.push({ id: '2026-07-t-1', date: '2026-07-01', merchant: 'PREAUTHORIZED DEBIT SAMPLE PROPERTY MGMT', name: '', amount: -1200, category: 'other', statement: '2026-07' });
+  v.transactions.push({ id: '2026-07-t-2', date: '2026-07-08', merchant: 'VISA DEBIT PURCHASE PROVIGO', name: '', amount: -300, category: 'other', statement: '2026-07' });
+  v.statements.push({ id: '2026-07', start: '2026-07-01', end: '2026-07-10', opening: 1000, closing: 1000 });
+  const m = buildModel(v, compiled);
+  const p = pace(m, '2026-07-11');
+  assert.equal(p.ym, '2026-07');
+  assert.equal(pace(m, '2026-12-01'), null, 'no "July so far" in December');
+  assert.equal(p.day, 10);
+  assert.ok(p.soFar > p.usualSoFar, 'spending more than usual by day 10');
+  assert.ok(p.projected > p.usualTotal);
+  const u = unusual(m);
+  assert.equal(u[0].t.amount, -480);
+  assert.equal(u[0].kind, 'merchant');
+  const cf = cashflow(m);
+  assert.equal(cf.months.length, 6);
+  assert.ok(cf.rate < 1 && cf.rate > -1);
+});
+
+await test('insight cards: ranked, with a detail for every one', () => {
+  const v = lifeVault({ extra: (add, k) => { if (k === 6) { add(12, 'VISA DEBIT PURCHASE SPORT CHEK', -64.99); add(12, 'VISA DEBIT PURCHASE SPORT CHEK', -64.99); } } });
+  const cards = insights(buildModel(v, compiled), '2026-07-02');
+  const ids = cards.map((c) => c.id);
+  assert.equal(ids[0], 'duplicate');
+  for (const id of ['pricehike', 'upcoming', 'recurring', 'savings']) assert.ok(ids.includes(id), id);
+  for (let i = 1; i < cards.length; i++) assert.ok(cards[i - 1].score >= cards[i].score);
+  assert.ok(cards.length <= 12);
+  for (const c of cards) assert.ok(c.title && c.text && c.kicker && c.icon, c.id);
+});
+
+await test('one big month on a bill is not a price rise; a reversed part leaves the rest counted', () => {
+  const v = lifeVault({ extra: (add, k) => { if (k === 6) add(4, 'INTERNET BILL PAY FIZZ', -17.86); } }); // that month's bill: 40.24 + 17.86
+  const fizz = recurring(buildModel(v, compiled)).find((r) => r.name === 'Fizz');
+  assert.equal(fizz?.change, null);
+  const w = emptyVault();
+  w.statements.push({ id: '2026-03', start: '2026-03-01', end: '2026-03-31', opening: 100, closing: 100 });
+  w.transactions.push({ id: 'x', date: '2026-03-02', merchant: 'COSTCO WHOLESALE', name: '', amount: -150.01, category: 'other', statement: '2026-03', parts: [{ category: 'groceries', amount: -100 }, { category: 'household', amount: -50.01 }] });
+  w.transactions.push({ id: 'y', date: '2026-03-09', merchant: 'VISA DEBIT REVERSAL COSTCO WHOLESALE', name: '', amount: 50.01, category: 'other', statement: '2026-03' });
+  const m = buildModel(w, compiled);
+  assert.equal(m.byId.get('x').live, -10000);
+  assert.equal(m.byId.get('x').netted, false);
+});
+
+console.log('Amazon and split charges');
+await test('what a product is, from its title or department', () => {
+  const p = (title, dept = '') => productCategory(title, dept, compiled);
+  assert.equal(p('Apple iPhone 15 Pro Max Silicone Case with MagSafe'), 'electronics');
+  assert.equal(p('Anker USB C Charger 65W'), 'electronics');
+  assert.equal(p('Organic Whole Bean Coffee Beans 2lb'), 'groceries');
+  assert.equal(p('Cuisinart Coffee Maker 12-Cup'), 'household');
+  assert.equal(p('Bounty Paper Towels, 12 Rolls'), 'household');
+  assert.equal(p('Nature Made Fish Oil 1200 mg'), 'health');
+  assert.equal(p('Whey Protein Powder, Chocolate'), 'fitness');
+  assert.equal(p('LEGO Classic Bricks'), 'entertainment');
+  assert.equal(p('Something', 'Grocery & Gourmet Food'), 'groceries');
+  assert.equal(p('Mystery widget'), null);
+});
+
+await test('Amazon descriptors that say what they were', () => {
+  const c = (merchant) => categorize({ merchant, amount: -10 }, compiled, []);
+  assert.deepEqual(c('AMZN Mktp CA*2A3B4C5D6'), { name: 'Amazon', category: 'shopping' });
+  assert.equal(c('Amazon Prime*1A2B3C').category, 'entertainment');
+  assert.equal(c('Kindle Svcs*X1Y2').category, 'entertainment');
+  assert.equal(c('AMAZON FRESH').category, 'groceries');
+  assert.equal(c('WHOLEFDS MKT 10234').category, 'groceries');
+  assert.equal(c('AMAZON PHARMACY').category, 'health');
+  assert.equal(c('BEST BUY #123').category, 'electronics');
+  assert.equal(c('HOME DEPOT 7034').category, 'household');
+  assert.ok(isMixedStore('Amazon', compiled) && isMixedStore('Costco', compiled) && !isMixedStore('Netflix', compiled));
+});
+
+// The columns Amazon's "Your Orders" export has, with made-up values.
+const AMZ_HEAD = ['Website', 'Order ID', 'Order Date', 'Purchase Order Number', 'Currency', 'Unit Price', 'Unit Price Tax', 'Shipping Charge', 'Total Discounts', 'Total Owed', 'Shipment Item Subtotal', 'Shipment Item Subtotal Tax', 'ASIN', 'Product Condition', 'Quantity', 'Payment Instrument Type', 'Order Status', 'Shipment Status', 'Ship Date', 'Shipping Option', 'Shipping Address', 'Billing Address', 'Carrier Name & Tracking Number', 'Product Name', 'Gift Message', 'Gift Sender Name', 'Gift Recipient Contact Details', 'Item Serial Number'];
+const amzRow = (order, date, ship, total, title, status = 'Closed') => ['Amazon.ca', order, `${date}T15:00:00Z`, 'Not Applicable', 'CAD', String(total), '0', '0', '0', String(total), 'Not Available', 'Not Available', 'B0SAMPLE', 'New', '1', 'Visa - 0000', status, 'Shipped', ship ? `${ship}T10:00:00Z` : 'Not Available', 'std', '1 SAMPLE STREET SAMPLETOWN', '1 SAMPLE STREET SAMPLETOWN', 'CARRIER(TRACK0000)', title, '', '', '', ''];
+const csvOf = (rows) => [AMZ_HEAD, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+function zipOf(files) {
+  // A minimal zip: deflated entries, central directory, end record (CRCs aren't checked by the reader).
+  const parts = [], central = [];
+  let off = 0;
+  for (const [name, text] of files) {
+    const nameB = Buffer.from(name), data = deflateRawSync(Buffer.from(text)), raw = Buffer.byteLength(text);
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(8, 8); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(raw, 22); local.writeUInt16LE(nameB.length, 26);
+    const cd = Buffer.alloc(46); cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(20, 6); cd.writeUInt16LE(8, 10); cd.writeUInt32LE(data.length, 20); cd.writeUInt32LE(raw, 24); cd.writeUInt16LE(nameB.length, 28); cd.writeUInt32LE(off, 42);
+    parts.push(local, nameB, data); central.push(cd, nameB);
+    off += 30 + nameB.length + data.length;
+  }
+  const cdBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10); end.writeUInt32LE(cdBuf.length, 12); end.writeUInt32LE(off, 16);
+  return new Uint8Array(Buffer.concat([...parts, cdBuf, end]));
+}
+
+await test('Amazon order history: read from the zip, grouped by shipment, addresses never kept', async () => {
+  const csv = csvOf([
+    amzRow('701-0000001-0000001', '2026-03-03', '2026-03-04', 22.59, 'Organic Whole Bean Coffee Beans 2lb'),
+    amzRow('701-0000001-0000001', '2026-03-03', '2026-03-04', 33.89, 'Anker USB C Charger 65W'),
+    amzRow('701-0000001-0000001', '2026-03-03', '2026-03-09', 12.5, 'Paper Towels, 6 Rolls'),
+    amzRow('701-0000002-0000002', '2026-03-10', '2026-03-11', 1015.87, 'Samsung Galaxy S24 128GB Unlocked'),
+    amzRow('701-0000003-0000003', '2026-03-12', null, 16.95, 'Bounty Paper Towels', 'Cancelled'),
+  ]);
+  const zip = zipOf([['Retail.OrderHistory.1/Retail.OrderHistory.1.csv', csv], ['Digital-Ordering.1/Digital Items.csv', 'ASIN,Title\nX,Y\n']]);
+  const ships = await readOrderFiles([{ bytes: zip }], compiled);
+  assert.deepEqual(ships.map((s) => [s.date, s.ship, s.cents, s.items.map((i) => i.category).join('+')]), [
+    ['2026-03-03', '2026-03-04', 5648, 'groceries+electronics'],
+    ['2026-03-03', '2026-03-09', 1250, 'household'],
+    ['2026-03-10', '2026-03-11', 101587, 'electronics'],
+  ]);
+  const v = emptyVault();
+  applyOrders(v, ships);
+  assert.equal(v.orders.length, 3, 'waiting for statements');
+  const json = JSON.stringify(v);
+  assert.ok(!/SAMPLE STREET|TRACK0000|701-000|Visa - 0000/.test(json), 'no address, tracking, order number or card kept');
+  // The CSV inside works on its own too.
+  assert.equal((await readOrderFiles([{ bytes: new TextEncoder().encode(csv) }], compiled)).length, 3);
+  await assert.rejects(readOrderFiles([{ bytes: new TextEncoder().encode('Date,Description,Amount\n2026-01-01,X,1\n') }], compiled), /No Amazon orders/);
+  // Two files out of order make one timeline.
+  const two = await readOrderFiles([{ bytes: new TextEncoder().encode(csvOf([amzRow('701-9', '2026-05-02', '2026-05-03', 9, 'Pasta')])) }, { bytes: new TextEncoder().encode(csv) }], compiled);
+  assert.deepEqual(two.map((x) => x.date), ['2026-03-03', '2026-03-03', '2026-03-10', '2026-05-02']);
+  assert.deepEqual([_amz.day('03/25/2024'), _amz.day('25/03/2024'), _amz.day('13/13/2024')], ['2024-03-25', '2024-03-25', null]);
+});
+
+await test('Amazon orders matched to charges: split by category, refunds sorted, whole-order charges', async () => {
+  const csv = csvOf([
+    amzRow('701-0000001-0000001', '2026-03-03', '2026-03-04', 22.59, 'Organic Whole Bean Coffee Beans 2lb'),
+    amzRow('701-0000001-0000001', '2026-03-03', '2026-03-04', 33.89, 'Anker USB C Charger 65W'),
+    amzRow('701-0000002-0000002', '2026-03-10', '2026-03-11', 1015.87, 'Samsung Galaxy S24 128GB Unlocked'),
+    amzRow('701-0000004-0000004', '2026-03-14', '2026-03-15', 10, 'Dish Soap'),
+    amzRow('701-0000004-0000004', '2026-03-14', '2026-03-17', 20, 'Vitamin D3 Softgels'),
+  ]);
+  const ships = await readOrderFiles([{ bytes: new TextEncoder().encode(csv) }], compiled);
+  const v = emptyVault();
+  v.statements.push({ id: '2026-03', start: '2026-03-01', end: '2026-03-31', opening: 2000, closing: 0 });
+  const tx = (id, date, merchant, amount) => v.transactions.push({ id, date, merchant, name: '', amount, category: 'other', statement: '2026-03' });
+  tx('a', '2026-03-05', 'AMZN Mktp CA*2A3B4C5', -56.48);
+  tx('b', '2026-03-12', 'AMAZON.CA*XY12', -1015.87);
+  tx('c', '2026-03-14', 'AMAZON.CA*AB34', -30);
+  tx('d', '2026-03-20', 'AMAZON.CA', 33.89);
+  tx('e', '2026-03-21', 'AMAZON.CA*ZZ', -12.0);
+  // The statement with the last charge comes later.
+  const late = v.transactions.splice(v.transactions.findIndex((t) => t.id === 'c'), 1)[0];
+  buildModel(v, compiled); // names first, as the app has them
+  const r = applyOrders(v, ships);
+  assert.deepEqual([r.charges, r.matched, r.refunds], [3, 2, 1]);
+  assert.equal(v.orders.length, 2, 'only the shipments still waiting are kept');
+  v.transactions.push(late);
+  buildModel(v, compiled);
+  assert.equal(matchWaiting(v).matched, 1);
+  assert.equal(v.orders, undefined, 'nothing left waiting');
+  const m = buildModel(v, compiled);
+  const parts = m.txns.filter((t) => t.partOf === 'a');
+  assert.deepEqual(parts.map((t) => [t.cat.id, t.c]), [['groceries', -2259], ['electronics', -3389]]);
+  assert.equal(m.byId.get('a').split.length, 2, 'the whole charge is still one entry');
+  assert.equal(m.byId.get('b').cat.id, 'electronics');
+  assert.deepEqual(m.txns.filter((t) => t.partOf === 'c').map((t) => t.cat.id).sort(), ['health', 'household']);
+  assert.equal(m.byId.get('d').cat.id, 'electronics', 'refund of the charger reduces Electronics');
+  assert.equal(m.byId.get('e').cat.id, 'shopping');
+  // Totals add up the same with or without splits.
+  assert.equal(m.txns.reduce((s, t) => s + t.c, 0), v.transactions.reduce((s, t) => s + toCents(t.amount), 0));
+  const cats = Object.fromEntries(spendByCategory(m.txns).map((x) => [x.cat.id, x.cents]));
+  assert.equal(cats.electronics, 3389 + 101587 - 3389);
+  // Your own fix to an item survives matching again.
+  v.transactions.find((t) => t.id === 'a').items[0].category = 'household';
+  v.transactions.find((t) => t.id === 'a').items[0].set = true;
+  applyOrders(v, ships);
+  assert.equal(v.transactions.find((t) => t.id === 'a').items[0].category, 'household');
+});
+
+await test('splitting a charge by hand, and a refund of a whole split charge', () => {
+  const v = emptyVault();
+  v.statements.push({ id: '2026-03', start: '2026-03-01', end: '2026-03-31', opening: 100, closing: 100 });
+  v.transactions.push({ id: 'x', date: '2026-03-02', merchant: 'COSTCO WHOLESALE', name: '', amount: -150.01, category: 'other', statement: '2026-03', parts: [{ category: 'groceries', amount: -100 }, { category: 'household', amount: -50.01 }] });
+  v.transactions.push({ id: 'y', date: '2026-03-09', merchant: 'VISA DEBIT REVERSAL COSTCO WHOLESALE', name: '', amount: 150.01, category: 'other', statement: '2026-03' });
+  const m = buildModel(v, compiled);
+  assert.deepEqual(m.txns.filter((t) => t.partOf).map((t) => [t.cat.id, t.c, t.netted]), [['groceries', -10000, true], ['household', -5001, true]]);
+  assert.equal(m.byId.get('y').netted, true);
+  assert.equal(m.byId.get('x').netted, true);
+  assert.deepEqual(splitParts({ amount: -10, items: [{ amount: 3.33, category: 'a' }, { amount: 3.33, category: 'b' }, { amount: 3.34, category: 'a' }] }).map((p) => p.cents), [667, 333]);
+});
+
+await test('the sample data shows every new kind of insight', async () => {
+  const { app } = await import('../js/state.js');
+  app.rules = compiled;
+  const { demoVault } = await import('../js/demo.js');
+  const ids = insights(buildModel(demoVault(), compiled), '2026-10-09').map((c) => c.id);
+  for (const id of ['duplicate', 'pace', 'pricehike', 'upcoming', 'unusual', 'recurring', 'amazon']) assert.ok(ids.includes(id), id);
 });
 
 console.log('PDF import (synthetic statements)');

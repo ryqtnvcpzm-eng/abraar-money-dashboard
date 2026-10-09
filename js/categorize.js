@@ -135,6 +135,7 @@ function compileLexicon(lex = {}) {
     const index = new Map();
     const prefixes = [];
     for (const [category, words] of Object.entries(byCat || {})) {
+      if (category.startsWith('_')) continue;
       for (const raw of words) {
         const prefix = raw.endsWith('*');
         const tokens = normText(prefix ? raw.slice(0, -1) : raw).split(' ').filter(Boolean);
@@ -179,8 +180,47 @@ export function compileRules(doc) {
     merchantRules: rules.filter((r) => r.stage !== 'type' && !r.weak),
     weakRules: rules.filter((r) => r.weak),
     lexicon: compileLexicon(doc.lexicon),
+    items: compileLexicon({ words: doc.products, departments: doc.productDepartments }),
+    // Stores that sell a bit of everything: one category per visit is a guess, so changes default to "only this one".
+    mixed: new Set(rules.filter((r) => r.mixed && r.name).map((r) => r.name.toLowerCase())),
   };
 }
+
+/** Every lexicon entry found in the text, with its length (longer phrases say more). */
+function allMatches(text, tier) {
+  const out = [];
+  if (!tier) return out;
+  const tokens = normText(text).split(' ').filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    for (const e of tier.index.get(tokens[i]) || []) {
+      if (i + e.tokens.length > tokens.length) continue;
+      let ok = true;
+      for (let k = 0; k < e.tokens.length && ok; k++) {
+        const w = tokens[i + k];
+        ok = k === e.tokens.length - 1 && e.prefix ? w.startsWith(e.tokens[k]) : w === e.tokens[k];
+      }
+      if (ok) out.push(e);
+    }
+    for (const e of tier.prefixes) if (tokens[i].startsWith(e.tokens[0])) out.push(e);
+  }
+  return out;
+}
+
+/**
+ * What kind of thing is this product? ("Anker USB-C Charger" → electronics, "Bounty Paper Towels" → household.)
+ * title: the product name; department: the store's own section name when known. Returns a category id or null.
+ */
+export function productCategory(title, department, compiled) {
+  const score = new Map();
+  for (const e of allMatches(title, compiled.items?.words)) score.set(e.category, (score.get(e.category) || 0) + e.len);
+  for (const e of allMatches(department || '', compiled.items?.departments)) score.set(e.category, (score.get(e.category) || 0) + 12);
+  let best = null;
+  for (const [cat, v] of score) if (compiled.cats.has(cat) && (!best || v > best[1])) best = [cat, v];
+  return best ? best[0] : null;
+}
+
+/** A store that sells many kinds of things (Amazon, Walmart, Costco…). */
+export const isMixedStore = (name, compiled) => !!compiled.mixed?.has(String(name || '').toLowerCase());
 
 // Merchant category codes (ISO 18245), when a bank prints them ("MCC 5812").
 const MCC = [

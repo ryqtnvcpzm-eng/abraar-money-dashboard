@@ -3,7 +3,7 @@ import { app } from '../state.js';
 import { money, dateLabel, esc, fromCents, addDays, plural, monthLabel } from '../format.js';
 import { dailyBalance, flow, insights, currentBalance } from '../ledger.js';
 import { uncategorized } from './teach.js';
-import { icon, pageFrame, wireLargeTitle, haptic } from '../ui.js';
+import { icon, pageFrame, wireLargeTitle, haptic, openSheet } from '../ui.js';
 import { balanceChart } from '../charts.js';
 
 const RANGES = [['1M', 30], ['3M', 91], ['6M', 182], ['YTD', 'ytd'], ['ALL', 'all']];
@@ -95,7 +95,7 @@ export function renderOverview(page) {
   const cards = insights(m);
   const ins = page.querySelector('#ov-insights');
   if (cards.length) {
-    ins.innerHTML = `<div class="section-head"><h2>Insights</h2></div>
+    ins.innerHTML = `<div class="section-head"><h2>Insights</h2>${cards.length > 2 ? '<button class="more link" data-act="all-insights">See All</button>' : ''}</div>
       <div class="insights" id="ins-row" tabindex="0" aria-label="Insights, swipe for more">
         ${cards.map((c, i) => `<button type="button" class="insight" data-ins="${i}" style="--c:var(--${esc(c.color)})" aria-label="${esc(`${c.kicker}: ${c.title}. ${c.text}`)}">
           <span class="kicker">${icon(c.icon)}<span>${esc(c.kicker)}</span>${icon('chev-r', 'chev')}</span><h3>${esc(c.title)}</h3><p>${esc(c.text)}</p></button>`).join('')}
@@ -116,6 +116,20 @@ export function renderOverview(page) {
       if (i !== last) { dots[last].classList.remove('on'); dots[i].classList.add('on'); last = i; }
     }, { passive: true });
   }
+}
+
+/** Every insight in one scrolling list. */
+function openAllInsights() {
+  const cards = insights(app.model);
+  const sheet = openSheet({ title: 'Insights', size: 'full', body: `<div class="insight-list">${cards.map((c, i) => `
+    <button type="button" class="insight" data-ins="${i}" style="--c:var(--${esc(c.color)})">
+      <span class="kicker">${icon(c.icon)}<span>${esc(c.kicker)}</span>${icon('chev-r', 'chev')}</span><h3>${esc(c.title)}</h3><p>${esc(c.text)}</p></button>`).join('')}</div>` });
+  sheet.el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-ins]');
+    if (!b) return;
+    haptic();
+    (await import('./insight.js')).openInsight(cards[+b.dataset.ins]);
+  });
 }
 
 function banners() {
@@ -172,5 +186,6 @@ function wire(page) {
     if (act === 'teach') (await import('./teach.js')).openTeach();
     if (act === 'save') (await import('./settings.js')).saveToRepo();
     if (act === 'exit-demo') app.lock();
+    if (act === 'all-insights') openAllInsights();
   };
 }

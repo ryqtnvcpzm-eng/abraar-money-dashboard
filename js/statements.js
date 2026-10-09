@@ -12,7 +12,7 @@ import { decodeText, sniff, parseCsv, parseOfx, parseQif } from './file-formats.
 import { daysInMonth } from './format.js';
 
 const round2 = (n) => Math.round(n * 100) / 100;
-export const ACCEPT = 'application/pdf,.pdf,.csv,.tsv,.txt,.ofx,.qfx,.qif,text/csv,text/plain,application/x-ofx,application/vnd.intu.qfx';
+export const ACCEPT = 'application/pdf,.pdf,.csv,.tsv,.txt,.ofx,.qfx,.qif,.zip,text/csv,text/plain,application/x-ofx,application/vnd.intu.qfx,application/zip';
 export const isStatementFile = (f) => /\.(pdf|csv|tsv|txt|ofx|qfx|qif)$/i.test(f.name) || /pdf|csv|ofx|qfx|text\/plain/i.test(f.type || '');
 
 export class StatementError extends Error {}

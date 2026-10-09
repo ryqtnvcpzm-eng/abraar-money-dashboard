@@ -146,8 +146,24 @@ export function openImporter({ welcome = false } = {}) {
     f.status = 'ready';
   }
 
-  async function addFiles(list) {
-    const chosen = [...list].filter(isStatementFile);
+  async function addFiles(picked) {
+    // Copy now: the picker's FileList is emptied as soon as this returns to the event loop.
+    let list = [...picked];
+    // Amazon's order history (its zip, or the CSV inside) sorts Amazon charges rather than adding a statement.
+    const amazonFiles = [];
+    for (const f of list) {
+      if (/\.zip$/i.test(f.name) || /zip/i.test(f.type || '')) amazonFiles.push(f);
+      else if (/\.csv$/i.test(f.name) && /order id|order date/i.test(await f.slice(0, 2000).text())) amazonFiles.push(f);
+    }
+    if (amazonFiles.length) {
+      try {
+        const r = await (await import('./amazon-import.js')).importAmazonFiles(amazonFiles);
+        toast(r.matched ? `Sorted ${plural(r.matched, 'Amazon charge')}` : 'Amazon orders saved', { icon: 'box', color: 'orange' });
+      } catch (e) { toast(e?.message || 'Couldn’t read the Amazon file', { icon: 'warn', color: 'orange' }); }
+      list = list.filter((f) => !amazonFiles.includes(f));
+      if (!list.length) return;
+    }
+    const chosen = list.filter(isStatementFile);
     if (!chosen.length) { toast('Choose PDF, CSV, OFX or QIF files', { icon: 'warn', color: 'orange' }); return; }
     const needsPdf = chosen.some((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
     const lib = needsPdf ? await loadPdfjs().catch(() => null) : null;
@@ -230,6 +246,8 @@ export function openImporter({ welcome = false } = {}) {
         commitImport(app.vault, prep);
         n += prep.transactions.length;
       }
+      // Amazon orders added earlier find their charges in the new statements.
+      if (app.vault.orders?.length) (await import('../amazon.js')).matchWaiting(app.vault);
       await app.commit({ silent: true });
       done = { statements: chosen.length, txns: n, unknown: (await import('./teach.js')).uncategorized().length };
       draw();
