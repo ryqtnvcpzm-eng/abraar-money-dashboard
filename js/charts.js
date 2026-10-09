@@ -324,33 +324,34 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
 // Activity rings
 // ---------------------------------------------------------------------------
 /** rings: [{p (0..n), c1, c2, label}] outer → inner. Animate with animateRings(el). */
-export function ringsSVG(rings, size = 148) {
-  const sw = 17;
-  const gap = 2.5;
+export function ringsSVG(rings, size = 148, idp = 'rg') {
+  const sw = Math.round(size * 0.115);
+  const gap = size >= 120 ? 2.5 : 2;
   const cx = size / 2;
   let out = `<svg viewBox="0 0 ${size} ${size}" role="img" aria-label="${esc(rings.map((r) => `${r.label} ${Math.round(r.p * 100)}%`).join(', '))}"><defs>`;
   rings.forEach((r, i) => {
-    out += `<linearGradient id="rg${i}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${r.c1}"/><stop offset="1" stop-color="${r.c2}"/></linearGradient>`;
+    out += `<linearGradient id="${idp}${i}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${r.c1}"/><stop offset="1" stop-color="${r.c2}"/></linearGradient>`;
   });
-  out += `<filter id="capShadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#000" flood-opacity=".55"/></filter></defs>`;
+  out += `<filter id="${idp}cap" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#000" flood-opacity=".55"/></filter></defs>`;
   rings.forEach((r, i) => {
     const rad = cx - sw / 2 - i * (sw + gap);
     const C = 2 * Math.PI * rad;
     const p = Math.max(0, r.p);
     const first = Math.min(1, p);
     out += `<circle cx="${cx}" cy="${cx}" r="${rad}" fill="none" stroke="${r.c1}" stroke-opacity=".22" stroke-width="${sw}"/>`;
-    out += `<circle class="ring-arc" cx="${cx}" cy="${cx}" r="${rad}" fill="none" stroke="url(#rg${i})" stroke-width="${sw}" stroke-linecap="round"
+    out += `<circle class="ring-arc" cx="${cx}" cy="${cx}" r="${rad}" fill="none" stroke="url(#${idp}${i})" stroke-width="${sw}" stroke-linecap="round"
       stroke-dasharray="${C}" stroke-dashoffset="${C}" data-target="${C * (1 - first)}" transform="rotate(-90 ${cx} ${cx})" ${first === 0 ? 'stroke-opacity="0"' : ''}/>`;
     if (p > 1) {
       // second lap, with a shadowed end cap like the Fitness app
       const extra = Math.min(1, p - 1);
-      out += `<circle class="ring-arc" cx="${cx}" cy="${cx}" r="${rad}" fill="none" stroke="${r.c2}" stroke-width="${sw}" stroke-linecap="round" filter="url(#capShadow)"
+      out += `<circle class="ring-arc" cx="${cx}" cy="${cx}" r="${rad}" fill="none" stroke="${r.c2}" stroke-width="${sw}" stroke-linecap="round" filter="url(#${idp}cap)"
         stroke-dasharray="${C}" stroke-dashoffset="${C}" data-target="${C * (1 - extra)}" transform="rotate(-90 ${cx} ${cx})"/>`;
     }
   });
   return out + '</svg>';
 }
 export function animateRings(root) {
+  if (!root) return;
   const arcs = root.querySelectorAll('.ring-arc');
   if (reducedMotion()) { arcs.forEach((a) => (a.style.strokeDashoffset = a.dataset.target)); return; }
   whenSettled(root, () => requestAnimationFrame(() => requestAnimationFrame(() => arcs.forEach((a, i) => {
@@ -373,4 +374,76 @@ function growIn(wrap) {
   const a = svg.animate([{ opacity: 0, transform: 'translateY(10px) scaleY(.96)' }, { opacity: 1, transform: 'none' }], { duration: 460, easing: 'cubic-bezier(.2,.9,.25,1)', fill: 'backwards' });
   a.pause();
   whenSettled(wrap, () => requestAnimationFrame(() => a.play()));
+}
+
+// ---------------------------------------------------------------------------
+// Category bars (Spending tab, like Apple Card): one bar per day or month, stacked by category
+// ---------------------------------------------------------------------------
+/**
+ * bars: [{ key, label, title, total (cents), rows: [{cat, cents}] }]
+ * opts: { order: [catId] (stack order; the rest is "Other"), selected: key|null, onSelect(key|null), avg (cents), every: label step }
+ */
+export function categoryBars(wrap, bars, { order = [], selected = null, onSelect, avg = null, every = 1, height = 196 } = {}) {
+  const W = Math.max(280, wrap.clientWidth || 320);
+  const H = height;
+  const pad = { t: 24, r: 44, b: 24, l: 2 };
+  const iw = W - pad.l - pad.r;
+  const ih = H - pad.t - pad.b;
+  // One huge day (rent on the 1st) would flatten every other bar: cap the scale and cut that bar.
+  const sorted = bars.map((b) => b.total).sort((a, b) => b - a);
+  const cap = bars.length > 3 && sorted[1] > 0 && sorted[0] > sorted[1] * 2.5 ? Math.max(sorted[1] * 1.45, avg || 0) : null;
+  const maxV = Math.max(1, cap ?? sorted[0] ?? 0, avg || 0) / 100;
+  const step = niceStep(maxV, 3);
+  const top = Math.ceil((maxV * 1.04) / step) * step;
+  const Y = (v) => pad.t + ih * (1 - v / top);
+  const band = iw / bars.length;
+  const bw = Math.max(3, Math.min(22, band * (bars.length > 20 ? 0.66 : 0.58)));
+  const radius = Math.min(bars.length > 20 ? 2.5 : 5, bw / 2);
+  let g = '';
+  for (let v = step; v <= top + 1e-9; v += step) {
+    g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(v)}" y2="${Y(v)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
+    g += `<text class="chart-axis" x="${W - 2}" y="${Y(v) + 4}" text-anchor="end">${moneyShort(v)}</text>`;
+  }
+  g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(0)}" y2="${Y(0)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
+  bars.forEach((b, i) => {
+    const cx = pad.l + band * i + band / 2;
+    const x = cx - bw / 2;
+    const dim = selected != null && selected !== b.key;
+    const parts = [];
+    let other = 0;
+    for (const r of b.rows) { if (order.includes(r.cat.id)) parts.push(r); else other += r.cents; }
+    parts.sort((a, c) => order.indexOf(a.cat.id) - order.indexOf(c.cat.id));
+    if (other > 0) parts.push({ cat: { color: 'gray' }, cents: other });
+    let y0 = Y(0);
+    const segs = [];
+    const cut = cap && b.total > cap;
+    const scale = cut ? (top * 100 * 0.97) / b.total : 1;
+    parts.forEach((p, k) => {
+      const h = (ih * p.cents * scale) / 100 / top;
+      if (h <= 0) return;
+      const isTop = k === parts.length - 1;
+      const gap = isTop || h < 3 ? 0 : 1.5;
+      const yTop = y0 - h;
+      if (isTop) {
+        const r = Math.min(radius, h);
+        segs.push(`<path d="M${x},${y0}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + bw - r}Q${x + bw},${yTop} ${x + bw},${yTop + r}V${y0}Z" style="fill:var(--${p.cat.color})"/>`);
+      } else segs.push(`<rect x="${x}" y="${yTop + gap}" width="${bw}" height="${Math.max(0, h - gap)}" style="fill:var(--${p.cat.color})"/>`);
+      y0 = yTop;
+    });
+    const showLabel = i % every === 0 || b.key === selected;
+    g += `<g class="cb" data-key="${esc(b.key)}" style="opacity:${dim ? 0.3 : 1};transition:opacity 220ms;cursor:pointer">
+      <title>${esc(b.title)}: ${money(b.total / 100)}</title>
+      <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 36}" fill="transparent"/>
+      <g class="stack">${segs.join('')}${cut ? `<path d="M${x - 1},${Y(top * 0.62) + 2}L${x + bw + 1},${Y(top * 0.62) - 2}" style="stroke:var(--bg-2);stroke-width:3"/>` : ''}</g>
+      ${cut ? `<text class="chart-axis" x="${cx}" y="${pad.t - 8}" text-anchor="middle" style="fill:var(--label);font-weight:600">${moneyShort(b.total / 100)}</text>` : ''}
+      ${showLabel ? `<text class="chart-axis" x="${cx}" y="${H - 6}" text-anchor="middle" style="${b.key === selected ? 'fill:var(--label);font-weight:700' : ''}">${esc(b.label)}</text>` : ''}</g>`;
+  });
+  if (avg) {
+    const y = Y(avg / 100);
+    g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${y}" y2="${y}" style="stroke:var(--label-2)" stroke-width="1.2" stroke-dasharray="3 4"/>
+      <text class="chart-axis" x="${pad.l + 2}" y="${y - 5}" text-anchor="start" style="fill:var(--label-2);font-weight:600;paint-order:stroke;stroke:var(--bg-2);stroke-width:4px;stroke-linejoin:round">Avg</text>`;
+  }
+  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(bars.map((b) => `${b.title}: ${money(b.total / 100)}`).join(', '))}">${g}</svg>`;
+  if (!reducedMotion()) growIn(wrap);
+  wrap.querySelectorAll('.cb').forEach((c) => c.addEventListener('click', () => { haptic(); onSelect?.(c.dataset.key === selected ? null : c.dataset.key); }));
 }

@@ -11,10 +11,9 @@ import { app } from './state.js';
 import { renderOverview } from './views/overview.js';
 import { renderSpending } from './views/spending.js';
 import { renderActivity } from './views/activity.js';
-import { renderPlan } from './views/plan.js';
 import { recoveryCardHTML, wireRecoveryCard } from './views/recovery.js';
 
-const VIEWS = { overview: renderOverview, spending: renderSpending, activity: renderActivity, plan: renderPlan };
+const VIEWS = { overview: renderOverview, spending: renderSpending, activity: renderActivity };
 const lockEl = document.getElementById('lock');
 const lockBody = document.getElementById('lock-body');
 const lockLead = document.getElementById('lock-lead');

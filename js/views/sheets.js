@@ -1,6 +1,6 @@
 // Shared sheets: transaction detail (with re-categorize + "apply to all" rule), category/merchant drill-down, category picker.
 import { app } from '../state.js';
-import { money, monthLabel, dateLabel, esc, fromCents, toCents, plural } from '../format.js';
+import { money, monthLabel, dateLabel, esc, fromCents, toCents, plural, daysBetween } from '../format.js';
 import { filterMode, isSpend, splitParts } from '../ledger.js';
 import { userRuleFor, isMixedStore } from '../categorize.js';
 import { icon, catIcon, openSheet, haptic, toast, alertSheet } from '../ui.js';
@@ -11,7 +11,7 @@ export function txnRow(t, { showDate = false } = {}) {
   return `<button class="row with-icon tap txn ${t.netted ? 'netted' : ''}" data-txn="${esc(t.id)}">
     ${catIcon(t.cat)}
     <span class="main"><span class="title">${esc(t.name)}</span>
-      <span class="subtitle">${showDate ? `${dateLabel(t.date, 'short')} · ` : ''}${t.netted ? 'Reversed' : esc(t.cat.name)}${t.oneOff ? ' · One-off' : ''}${t.note?.length && !t.netted ? ` · ${esc(t.note[0])}${t.note.length > 1 ? ` +${t.note.length - 1}` : ''}` : ''}</span></span>
+      <span class="subtitle">${showDate ? `${dateLabel(t.date, 'short')} · ` : ''}${t.netted ? 'Reversed' : esc(t.cat.name)}${t.oneOff ? ' · One-off' : ''}${t.memo ? ` · ${esc(t.memo)}` : t.note?.length && !t.netted ? ` · ${esc(t.note[0])}${t.note.length > 1 ? ` +${t.note.length - 1}` : ''}` : ''}</span></span>
     <span class="value ${inn ? 'in' : ''}">${inn ? '+' : ''}${money(Math.abs(t.amount))}</span>
   </button>`;
 }
@@ -91,6 +91,8 @@ export function openTxn(id, { onChange } = {}) {
       ${itemRows ? `<div class="list-head"><span>Items</span><span>${itemsLocked ? 'Split by hand' : 'Tap to change'}</span></div><div class="list">${itemRows}</div>` : ''}
       <div class="list-head"><span>Details</span></div>
       <div class="list">
+        <label class="row"><span class="main"><span class="title">Note</span></span>
+          <input class="inline" id="txn-memo" value="${esc(raw?.memo || '')}" placeholder="Add a note" maxlength="140" autocomplete="off" enterkeyhint="done" aria-label="Note"></label>
         <div class="row"><span class="main"><span class="subtitle">On statement</span><span class="title" style="white-space:normal">${esc(t.merchant || '—')}</span></span></div>
         <div class="row"><span class="main"><span class="title">Statement</span></span><span class="detail">${esc(monthLabel(t.statement))}</span></div>
         ${t.balance != null ? `<div class="row"><span class="main"><span class="title">Balance after</span></span><span class="detail num">${money(t.balance)}</span></div>` : ''}
@@ -156,7 +158,17 @@ export function openTxn(id, { onChange } = {}) {
       draw(); onChange?.();
     }
   });
+  sheet.el.addEventListener('keydown', (e) => { if (e.target.id === 'txn-memo' && e.key === 'Enter') e.target.blur(); });
   sheet.el.addEventListener('change', async (e) => {
+    if (e.target.id === 'txn-memo') {
+      const raw = rawOf(id);
+      const memo = e.target.value.trim().slice(0, 140);
+      if ((raw.memo || '') === memo) return;
+      if (memo) raw.memo = memo; else delete raw.memo;
+      await app.commit({ silent: true });
+      onChange?.();
+      return;
+    }
     if (e.target.dataset.act !== 'oneoff') return;
     haptic();
     const raw = rawOf(id);
@@ -322,15 +334,18 @@ export function pickCategory(current, isIncome) {
 // ---------------------------------------------------------------------------
 // Category or merchant drill-down
 // ---------------------------------------------------------------------------
-export function openCategory(catId, { ym = 'all', mode = 'everything', merchant = null } = {}) {
+export function openCategory(catId, { ym = 'all', mode = 'everything', merchant = null, from = null, to = null, label = null } = {}) {
   const m = app.model;
   const cat = catId ? m.cats.get(catId) : null;
   const sheet = openSheet({ title: merchant || cat?.name || 'Category', size: 'full', body: '' });
+  // A date range (a week, a day) works like a month: grouped by day.
+  const ranged = !!(from && to);
+  const byDay = ranged ? daysBetween(from, to) <= 62 : ym !== 'all';
   const draw = () => {
     const f = filterMode(mode);
     const match = (t) => (merchant ? t.name === merchant && f(t) : t.cat.id === catId && f(t));
     const all = app.model.txns.filter(match);
-    const inPeriod = all.filter((t) => ym === 'all' || t.month === ym);
+    const inPeriod = all.filter((t) => (ranged ? t.date >= from && t.date <= to : ym === 'all' || t.month === ym));
     const live = inPeriod.filter((t) => !t.netted);
     const total = -live.reduce((s, t) => s + t.c, 0);
     const n = live.filter((t) => t.c < 0).length;
@@ -339,21 +354,21 @@ export function openCategory(catId, { ym = 'all', mode = 'everything', merchant 
     const months = app.model.months.map((mm) => ({ ym: mm, v: fromCents(-all.filter((t) => t.month === mm && !t.netted).reduce((s, t) => s + t.c, 0)) }));
     const groups = new Map();
     for (const t of [...inPeriod].reverse()) {
-      const k = ym === 'all' ? t.month : t.date;
+      const k = byDay ? t.date : t.month;
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(t);
     }
     sheet.setBody(`
       <div class="sheet-hero">
         ${catIcon(c, 'lg')}
-        <div class="when">${ym === 'all' ? 'All months' : esc(monthLabel(ym))}${mode === 'everyday' ? ' · Everyday' : ''}</div>
+        <div class="when">${label ? esc(label) : ym === 'all' ? 'All months' : esc(monthLabel(ym))}${mode === 'everyday' ? ' · Everyday' : ''}</div>
         <div class="amt num">${money(fromCents(total))}</div>
         <div class="when">${plural(n, 'payment')}${n ? ` · ${money(fromCents(total / n))} average` : ''}</div>
       </div>
       ${months.length > 1 ? `<div class="card">${miniColumns(months, c.color)}</div>` : ''}
       ${[...groups.entries()].map(([k, list]) => `
-        <div class="list-head"><span>${ym === 'all' ? esc(monthLabel(k)) : esc(dateLabel(k))}</span><span class="num">${money(fromCents(-list.filter((t) => !t.netted).reduce((s, t) => s + t.c, 0)))}</span></div>
-        <div class="list">${list.map((t) => txnRow(t, { showDate: ym === 'all' })).join('')}</div>`).join('') || '<div class="empty">No transactions.</div>'}`);
+        <div class="list-head"><span>${byDay ? esc(dateLabel(k)) : esc(monthLabel(k))}</span><span class="num">${money(fromCents(-list.filter((t) => !t.netted).reduce((s, t) => s + t.c, 0)))}</span></div>
+        <div class="list">${list.map((t) => txnRow(t, { showDate: !byDay })).join('')}</div>`).join('') || '<div class="empty">No transactions.</div>'}`);
   };
   draw();
   sheet.el.addEventListener('click', (e) => {

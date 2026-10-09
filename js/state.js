@@ -8,5 +8,5 @@ export const app = {
   demo: false,
   tab: 'overview',
   stale: new Set(),
-  ui: { range: 'ALL', month: null, mode: 'everyday', search: '', filter: 'all', planMonth: null },
+  ui: { range: 'ALL', mode: 'everyday', spKind: 'month', spAnchor: null, spSel: null, search: '', filter: 'all', actView: 'list', calMonth: null, calDay: null, planMonth: null },
 };
