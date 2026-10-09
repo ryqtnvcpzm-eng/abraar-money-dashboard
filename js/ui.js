@@ -71,6 +71,9 @@ export function openSheet(opts) {
   function close(result) {
     if (closed) return;
     closed = true;
+    el.classList.add('closing'); // background work waits until it's gone
+    // Anything still animating inside (a chart rising in) jumps to its end, so only the sheet itself moves.
+    try { el.getAnimations({ subtree: true }).forEach((a) => { if (a.effect?.target !== el) a.finish(); }); } catch { /* older browsers */ }
     el.classList.remove('open');
     scrim.classList.remove('open');
     const i = stack.indexOf(api);
@@ -86,6 +89,11 @@ export function openSheet(opts) {
   enableDrag(el, close);
   stack.push(api);
   opts.onMount?.(el, api);
+  // Once it has finished sliding in, the sheet is "settled": charts inside start their own animations
+  // then, so two things never animate on the main thread at once.
+  const settle = () => { if (el.classList.contains('settled')) return; el.classList.add('settled'); el.dispatchEvent(new Event('settled')); };
+  el.addEventListener('transitionend', (e) => { if (e.target === el && e.propertyName === 'transform') settle(); });
+  setTimeout(settle, reducedMotion() ? 60 : 620);
   requestAnimationFrame(() => requestAnimationFrame(() => {
     el.classList.add('open');
     scrim.classList.add('open');
@@ -107,15 +115,35 @@ const openAlerts = new Set();
 export function closeAllSheets() { [...stack].reverse().forEach((s) => s.close()); [...openAlerts].forEach((dismiss) => dismiss()); }
 export const topSheet = () => stack[stack.length - 1];
 
+/** Is a sheet sliding in or out right now? Heavy background work waits for that. */
+export const sheetMoving = () => !!document.querySelector('.sheet:not(.settled), .sheet.closing');
+
+/** Run fn once the sheet containing el has finished sliding in (or now, outside a sheet). */
+export function whenSettled(el, fn) {
+  const sheet = el?.closest?.('.sheet');
+  if (sheet && !sheet.classList.contains('settled')) sheet.addEventListener('settled', fn, { once: true });
+  else fn();
+}
+
 // The app behind the sheet recedes slightly, like iOS card presentation (phones only).
+// Only its transform animates (on the GPU). While it's dimmed underneath, its frosted-glass bars stop
+// blurring live — re-rendering those blurs every frame is what made sheets stutter — and they come back
+// after the last sheet has finished closing.
+let behindTimer;
 function updateBehind() {
   const app = document.getElementById('app');
   const on = stack.length > 0 && window.innerWidth < 1000 && !reducedMotion();
+  clearTimeout(behindTimer);
+  if (stack.length) {
+    document.body.classList.add('sheet-open');
+    app.classList.toggle('receded', on);
+  } else {
+    // Turning the blur back on costs one heavy frame: do it once everything has stopped moving.
+    const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 60));
+    behindTimer = setTimeout(() => idle(() => { if (!stack.length) { document.body.classList.remove('sheet-open'); app.classList.remove('receded'); } }, { timeout: 600 }), 560);
+  }
   app.classList.add('behind');
   app.style.transform = on ? 'scale(.94) translateY(8px)' : '';
-  app.style.borderRadius = on ? '24px' : '';
-  app.style.overflow = on ? 'hidden' : '';
-  app.style.filter = stack.length > 1 ? 'brightness(.9)' : '';
 }
 
 // Drag the sheet down from its header (or from the body when scrolled to the top) to dismiss.

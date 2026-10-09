@@ -22,6 +22,8 @@
   --fill-3: rgba(118, 118, 128, .12);
   --fill-4: rgba(116, 116, 128, .08);
   --glass: rgba(255, 255, 255, .72);
+  --glass-solid: rgb(250, 250, 252);   /* the glass, without the live blur (under a sheet) */
+  --bar-solid: rgb(244, 244, 248);
   --glass-edge: rgba(255, 255, 255, .7);
   --glass-shadow: 0 8px 32px rgba(0, 0, 0, .12), 0 1px 2px rgba(0, 0, 0, .06);
   --bar: rgba(242, 242, 247, .78);
@@ -82,6 +84,8 @@
     --fill-3: rgba(118, 118, 128, .24);
     --fill-4: rgba(118, 118, 128, .18);
     --glass: rgba(37, 37, 40, .66);
+    --glass-solid: rgb(38, 38, 41);
+    --bar-solid: rgb(12, 12, 13);
     --glass-edge: rgba(255, 255, 255, .12);
     --glass-shadow: 0 8px 32px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
     --bar: rgba(0, 0, 0, .7);
@@ -136,8 +140,11 @@ svg { display: block; }
 /* ---------- app frame ---------- */
 #app { position: fixed; inset: 0; }
 .pages { position: absolute; inset: 0; }
-.page { position: absolute; inset: 0; visibility: hidden; opacity: 0; transition: opacity 180ms ease, visibility 0s 180ms; }
-.page.active { visibility: visible; opacity: 1; transition: opacity 220ms ease; z-index: 1; }
+.page { position: absolute; inset: 0; visibility: hidden; }
+.page.active { visibility: visible; z-index: 1; }
+/* Switching tabs swaps instantly, like iOS; the new page just fades up its content (one GPU layer). */
+.page.entering .scroller { animation: pageIn 160ms ease-out both; }
+@keyframes pageIn { from { opacity: 0; } }
 .scroller {
   position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
   overscroll-behavior-y: contain; scroll-padding-top: calc(var(--sat) + var(--nav-h));
@@ -162,7 +169,7 @@ svg { display: block; }
 .navbar .nav-left { grid-column: 1; justify-self: start; display: flex; gap: 8px; pointer-events: auto; }
 .navbar .nav-right { grid-column: 3; justify-self: end; display: flex; gap: 8px; pointer-events: auto; }
 
-.large-title { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 2px 4px 14px; transform-origin: left center; will-change: transform; }
+.large-title { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 2px 4px 14px; transform-origin: left center; }
 .large-title h1 { margin: 0; }
 .large-title .sub { color: var(--label-2); font: 400 15px/20px var(--font); margin-bottom: 6px; }
 
@@ -453,7 +460,15 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
 .sheet-hero .amt { font: 700 40px/1.1 var(--font-display); letter-spacing: -.3px; margin: 2px 0 4px; }
 .sheet-hero .name { font: 600 20px/25px var(--font-display); }
 .sheet-hero .when { color: var(--label-2); font: 400 15px/20px var(--font); }
-#app.behind { transition: transform var(--dur) var(--spring), border-radius var(--dur) var(--spring), filter var(--dur); }
+#app.behind { transition: transform var(--dur) var(--spring); transform-origin: 50% 0; }
+/* While a sheet is up the app behind sits still, dimmed: one GPU layer, rounded once, no live blur. */
+body.sheet-open #app { will-change: transform; overflow: hidden; }
+#app.receded { border-radius: 24px; }
+body.sheet-open #app .navbar::before, body.sheet-open #app .glass-btn, body.sheet-open #app .tabbar {
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+body.sheet-open #app .tabbar, body.sheet-open #app .glass-btn { background: var(--glass-solid); }
+body.sheet-open #app .navbar::before { background: var(--bar-solid); }
 
 /* alert (centered) */
 .alert-wrap { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: var(--scrim); opacity: 0; transition: opacity 200ms ease; }

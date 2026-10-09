@@ -282,7 +282,7 @@ function openLine(id) {
       <div class="list-head"><span>Transactions · ${esc(monthLabel(ym, 'month'))}</span></div>
       <div class="list">${monthTx.slice().reverse().map((x) => txnRow(x, { showDate: true })).join('') || '<div class="empty" style="padding:24px">Nothing in this line this month.</div>'}</div>`}`,
   });
-  requestAnimationFrame(() => columnChart(sheet.el.querySelector('#line-chart'),
+  (() => columnChart(sheet.el.querySelector('#line-chart'),
     months.map((p, i) => ({ key: p.ym, label: monthLabel(p.ym, 'short'), title: monthLabel(p.ym), v: vals[i],
       color: savings ? (vals[i] < 0 ? 'red' : 'green') : vals[i] > line.amount ? 'red' : 'green' })),
     { highlight: ym, ref: { v: line.amount, label: savings ? 'Goal' : 'Budget' }, readout: (v) => money(v, { cents: false, sign: savings }), refFormat: m0 }));
