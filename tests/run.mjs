@@ -48,7 +48,9 @@ await test('rules categorize common merchants', () => {
   assert.equal(c('PAYROLL DEPOSIT EXAMPLE CORP', 2400), 'income');
   assert.equal(c('VISA DEBIT PURCHASE UBER *EATS'), 'dining');
   assert.equal(c('VISA DEBIT PURCHASE UBER *TRIP'), 'transport');
-  assert.equal(c('INTERNET BILL PAY FIZZ'), 'bills');
+  assert.equal(c('INTERNET BILL PAY FIZZ'), 'internet');
+  assert.equal(c('VISA DEBIT RETAIL PURCHASE VESTA *CHATR'), 'bills');
+  assert.equal(c('RETAIL PURCHASE MASSOTHERAPIE PLATEAU'), 'fitness');
   assert.equal(c('VISA DEBIT PURCHASE APPLE.COM/BILL'), 'entertainment');
   assert.equal(c('VISA DEBIT PURCHASE BANANA REPUBLIC'), 'other');
   assert.equal(c('DEPOSIT TPS/GST', 120), 'transfer_in');
@@ -155,7 +157,11 @@ try {
     const t = planTargets(plan);
     assert.equal(t.save, 3000); assert.equal(t.spend, 2000);
     assert.equal(plan.lines.reduce((s, l) => s + l.amount, 0), 2000);
-    assert.equal(t.eatingOut, plan.lines.filter((l) => l.id === 'dining' || l.id === 'coffee').reduce((s, l) => s + l.amount, 0));
+    assert.equal(t.eatingOut, plan.lines.filter((l) => l.categories.some((c) => plan.eatingOut.includes(c))).reduce((s, l) => s + l.amount, 0));
+    assert.equal(plan.lines[0].categories[0], 'housing');
+    assert.ok(plan.lines.some((l) => l.categories.includes('*')), 'a catch-all line exists');
+    // every spend category is budgeted somewhere (or falls to the catch-all)
+    assert.ok(compiled.categories.filter((c) => c.type === 'spend').every((c) => plan.lines.some((l) => l.categories.includes(c.id) || l.categories.includes('*'))));
     vault.plan = plan;
     assert.ok(insights(buildModel(vault, compiled), '2026-10-07').length >= 3);
   });

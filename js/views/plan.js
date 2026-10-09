@@ -2,7 +2,7 @@
 import { app } from '../state.js';
 import { money, monthLabel, dateLabel, esc, daysInMonth, iso, monthOf, daysBetween } from '../format.js';
 import { planMonths, planMonth, planTargets, planFromTemplate } from '../ledger.js';
-import { icon, pageFrame, wireLargeTitle, haptic, openSheet, toast } from '../ui.js';
+import { icon, pageFrame, wireLargeTitle, haptic, openSheet, toast, alertSheet } from '../ui.js';
 import { ringsSVG, animateRings } from '../charts.js';
 
 const RING = {
@@ -74,8 +74,18 @@ export function renderPlan(page) {
 
     ${summaryPills(plan, t)}
 
+    ${layoutOutdated(plan) ? `<div class="banner" style="--c:var(--blue)"><span class="ic">${icon('sparkle')}</span><span class="txt"><b>New budget layout</b><span>${esc(app.rules.planTemplate.lines.slice(0, 3).map((l) => l.name).join(' · '))} and ${app.rules.planTemplate.lines.length - 3} more, with savings first.</span></span><button class="btn small" data-act="apply-layout">Use It</button></div>` : ''}
     <div class="section-head"><h2>Budget</h2><span class="more ${pm.spent > t.spend ? 'neg' : ''}">${money(pm.spent, { cents: false })} of ${money(t.spend, { cents: false })}</span></div>
     <div class="list">
+      ${(() => {
+        // Pay yourself first: investing & savings sits above every spending line.
+        const r = t.save > 0 ? Math.max(0, pm.saved) / t.save : 0;
+        return `<div class="row budget-row" style="display:block">
+          <div class="row-top"><span class="title" style="font-weight:600">Investing &amp; Savings</span><span class="value">${money(Math.max(0, pm.saved), { cents: false })} <span class="muted">/ ${money(t.save, { cents: false })}</span></span></div>
+          <div class="bar" role="progressbar" aria-label="Investing and savings" aria-valuemin="0" aria-valuemax="${t.save}" aria-valuenow="${Math.round(Math.max(0, pm.saved))}"><i style="--c:var(--green);width:${Math.min(100, r * 100)}%"></i></div>
+          <div class="left" style="margin-top:6px">${pm.saved >= t.save ? '<span class="pos">Goal met</span>' : `${money(t.save - Math.max(0, pm.saved), { cents: false })} to go`}</div>
+        </div>`;
+      })()}
       ${pm.lines.map((l) => {
         const r = l.amount > 0 ? l.actual / l.amount : (l.actual > 0 ? 2 : 0);
         const color = r > 1 ? 'red' : r > 0.85 ? 'orange' : 'green';
@@ -126,6 +136,7 @@ function wire(page, options = [], idx = 0) {
   wireLargeTitle(page);
   page.onclick = (e) => {
     if (e.target.closest('[data-act="edit"]')) { haptic(); openPlanEditor(); return; }
+    if (e.target.closest('[data-act="apply-layout"]')) { haptic(); applyLayout(); return; }
     const s = e.target.closest('[data-step]');
     if (s && !s.disabled) { haptic(); app.ui.planMonth = options[idx + Number(s.dataset.step)]; renderPlan(page); return; }
     const mo = e.target.closest('[data-month]');
@@ -174,7 +185,7 @@ export function openPlanEditor() {
         <label class="row"><span class="main"><span class="title">${esc(l.name)}</span><span class="subtitle">${esc(l.categories.map((c) => (c === '*' ? 'everything else' : app.model.cats.get(c)?.name || c)).join(', '))}</span></span>
           <input class="inline num" inputmode="decimal" data-line="${i}" value="${l.amount}" aria-label="${esc(l.name)} budget"></label>`).join('')}
       </div>
-      <div class="btn-row"><button class="btn secondary" data-act="resplit">Re-split ${money(spend, { cents: false })} with the suggested shares</button></div>`
+      <div class="btn-row"><button class="btn secondary" data-act="resplit">Use the suggested budget for ${money(spend, { cents: false })}</button></div>`
       : `<p class="list-foot">After you enter your take-home pay, Money suggests a split of the spending budget that you can adjust.</p>`}
       <p class="list-foot">Your plan is stored inside the encrypted vault, never in the public code.</p>`);
   };
@@ -218,4 +229,24 @@ export function openPlanEditor() {
       toast('Plan saved');
     }
   });
+}
+
+/** The saved plan uses older budget lines than data/rules.json suggests. */
+function layoutOutdated(plan) {
+  const want = app.rules.planTemplate.lines.map((l) => l.id).join(',');
+  return plan.lines.map((l) => l.id).join(',') !== want;
+}
+
+async function applyLayout() {
+  const old = app.vault.plan;
+  const next = planFromTemplate(app.rules, { employer: old.employer, start: old.start, takeHome: old.takeHome, savePct: old.savePct });
+  const ok = await alertSheet({
+    title: 'Use the new budget layout?',
+    message: next.lines.map((l) => `${l.name} ${money(l.amount, { cents: false })}`).join(' · '),
+    actions: [{ label: 'Use It', value: true, style: 'primary' }, { label: 'Cancel', value: false, style: 'cancel' }],
+  });
+  if (!ok) return;
+  app.vault.plan = next;
+  await app.commit({ silent: true });
+  toast('Budget updated. Save to GitHub to sync.');
 }
