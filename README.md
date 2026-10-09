@@ -6,7 +6,7 @@ A private, Apple-style finance app for your iPhone home screen. It's a static si
 - **Spending**: by month, Everyday vs Everything, categories, monthly stacked chart, top merchants
 - **Activity**: every transaction, searchable. Re-categorize one, or apply the change to all from a merchant (saved as a rule).
 - **Plan**: budget from your start date, with Saved / Spent / Eating-out rings and budget vs actual
-- **Add Statement**: reads a CIBC PDF on your device, removes duplicates, categorizes, and reconciles to the bank's balances
+- **Add Statement**: reads statements from any bank on your device (PDF, or the CSV, OFX/QFX or QIF file online banking lets you download), removes duplicates, categorizes, and reconciles to the bank's balances
 - **Accounts**: share the link with family. Everyone gets their own private account with every feature, synced across their iPhone and Mac.
 
 **Privacy:** each account's data is one encrypted vault. The sync server (and the repo, for the original single-user vault `data/vault.enc.json`) only ever holds ciphertext: AES-256-GCM, with a key derived from the owner's passphrase (PBKDF2-SHA-256, 600k iterations). Statement PDFs never leave your device and are git-ignored. Account and transit numbers are never stored. The app auto-locks and asks search engines not to index it. See [docs/DESIGN.md](docs/DESIGN.md) for the design and the security model.
@@ -84,9 +84,9 @@ Accounts let anyone you send the link to make their **own** private account with
 
 Good to know:
 
-- **A forgotten passphrase can't be reset**, by you or anyone. That's what makes it private. Export Encrypted File (Settings) gives a backup copy.
+- **Forgot your passphrase?** Every account gets a **recovery key** when it's created (also in Settings → Recovery Key). On the lock screen tap **Forgot passphrase?** and enter it, or use **Reset with Face ID** on a device where Face ID is on. Without either, nobody can reset it, including you as the site owner. That's what keeps it private.
 - If two devices change the same account offline, the next sync asks which version to keep.
-- Statements are read for **CIBC** accounts. Other banks' PDFs won't import correctly yet.
+- Statements from **any bank** work: PDF statements in most layouts and languages, or the CSV, OFX/QFX or QIF download from online banking (the most reliable choice when a bank offers it). Scanned (image-only) PDFs can't be read.
 - If you turned on Cloudflare Access (below), add each person's email to its policy so they can reach the site.
 - To stop new sign-ups, change or delete `INVITE_CODE`. Existing accounts keep working while it's set; deleting it pauses sync for everyone until it's set again.
 
@@ -142,14 +142,16 @@ The home-screen app has its own storage, separate from Safari's, so it loads the
 
 ## Every month: add the new statement
 
-1. In CIBC Online Banking, download last month's **eStatement PDF**.
-2. Open Money → **+** (Overview or Activity) → **Choose PDFs** → pick the file.
-3. Check the card says **Reconciled**, then tap **Add Statement**.
-4. Tap **Save to GitHub**, or **Export Vault File** and commit it.
+1. In online banking, download last month's **statement PDF**, or a **CSV / OFX / QIF** export of your transactions.
+2. Open Money → **+** (Overview or Activity) → **Choose Files** → pick the file.
+3. Check the card says **Reconciled** (or **Not checked** for a download without balances), then tap **Add Statement**.
+4. With an account it syncs on its own. Without one, tap **Save to GitHub** or **Export Vault File** and commit it.
 
-Duplicates are skipped automatically. If you re-add a month, Money offers to replace it and keeps your category edits.
+Duplicates are skipped automatically, even across a PDF and a CSV of the same month. If you re-add a month, Money offers to replace it and keeps your category edits. A CSV or OFX that spans several months becomes one statement per month.
 
-**If a month doesn't reconcile**, the card shows exactly which check failed and by how much. That usually means a PDF layout the parser didn't expect. You can still import it with *Import anyway*; it stays flagged on the Overview until a clean re-import replaces it.
+**How it reads other banks:** CIBC statements use an exact CIBC reader. Everything else goes through a general reader that finds the table header (in English, French, Spanish, German, Italian, Portuguese or Dutch), reads dates in any common format (31/01/2026, 01/31/2026, 2026-01-31, 31 Jan 2026, 31. Januar…), reads amounts like 1,234.56, 1.234,56, (45.00) and 45.00 DR, and uses the running balance to confirm money in vs out. Tap **Review** on a card to see every line. If purchases show up as money in, or 03/04 was read the wrong way round, there are switches to fix it.
+
+**If a month doesn't reconcile**, the card shows exactly which check failed and by how much. That usually means a layout the reader didn't expect. You can still import it with *Import anyway*; it stays flagged on the Overview until a clean re-import replaces it.
 
 ## Categories and rules
 

@@ -28,7 +28,8 @@ Categories live in `data/rules.json`, and each has `everyday: true/false`. **Eve
 ## Data pipeline
 
 ```
-CIBC PDF ──pdf.js──▶ positioned text ──cibc-parser──▶ statement
+PDF ──pdf.js──▶ positioned text ──cibc-parser (CIBC) / generic-parser (any bank)──▶ statement
+CSV / OFX / QFX / QIF ──file-formats──▶ transactions ──split by month──▶ statements
    (on device)                                          │  summary: period, opening, withdrawals, deposits, closing
                                                         │  rows: date | description | withdrawals | deposits | balance
                                                         ▼
@@ -46,6 +47,18 @@ The parser reads x-positions from the table header, so every amount lands in the
 
 Anything else is flagged in red, and importing it needs an explicit *Import anyway*.
 
+**Other banks** (`js/generic-parser.js`, `js/file-formats.js`, `js/parse-util.js`). No per-bank templates; the general reader works from what every statement has:
+
+- *Header words* in seven languages locate the date, description, debit, credit, amount and balance columns, and amounts snap to the nearest column.
+- *Dates* in numeric, ISO and written forms (with month names in seven languages). Day/month order is settled by any date that can only be read one way (13/02), then by which order keeps dates in sequence. Missing years come from the statement period, rolling over at New Year.
+- *Amounts* with either decimal separator, spaces or apostrophes for thousands, currency symbols, and the signs banks use (−, trailing −, parentheses, CR/DR, Soll/Haben).
+- *Money in vs out*, strongest first: the column, a printed sign, then the running balance. Where only some lines show a balance, it solves for the fewest sign flips that make each balance add up. Descriptions ("salary", "refund", "Gehalt"…) are only a last resort, and the importer then says so.
+- *Credit cards* are recognised ("minimum payment", "credit limit"…) and read the other way round: charges are money out, and the balance owed counts as negative.
+- *Layouts*: amount on the first or last line of a multi-line entry, dates printed once per day, two date columns, newest-first order.
+- *Exports*: CSV delimiter, header row, decimal separator and columns are detected (or inferred from the data when there's no header). OFX ledger balances and CSV running balances give opening/closing balances per month. A file with no balances at all is imported as *Not checked* rather than *Doesn't match*.
+
+On the synthetic CIBC statements the general reader produces exactly the same transactions as the CIBC reader, which the tests check.
+
 ## Security model
 
 | Threat | Mitigation |
@@ -56,6 +69,7 @@ Anything else is flagged in red, and importing it needs an explicit *Import anyw
 | Account numbers | The parser never reads the header block. Descriptions are scrubbed of card numbers, 5+ digit runs and account or transit fragments before storage, and a test enforces this. |
 | Biometric unlock | Optional, per device. A platform passkey (iCloud Keychain, user verification required) evaluates the WebAuthn PRF extension. HKDF of that secret encrypts the raw vault key, and the result is stored only in that browser. Releasing it needs Face ID or Touch ID on that device; the passphrase is never stored. It's bound to the vault's KDF salt, so a passphrase change retires it. |
 | Accounts and sync | Optional (needs the D1 binding and an `INVITE_CODE` secret). Each account stores one vault envelope plus its public KDF salt. The browser derives an auth token as HKDF(raw vault key, "money/cloud-auth/v1"); the server keeps only SHA-256 of it, so reading or writing a vault needs the passphrase and the server never sees anything it could decrypt with. Accounts can't see each other. Unknown usernames get a stable fake KDF salt so the API doesn't reveal who has an account, wrong tokens are throttled (10 per 15 minutes per account), writes must be same-origin, and saves compare-and-swap on the vault's revision, so a stale device is asked which version to keep instead of overwriting. Creating an account needs the invite code. |
+| Forgotten passphrase | Each account gets a random 120-bit recovery key (24 characters). The browser wraps the raw vault key with AES-GCM under HKDF(recovery key, username) and the server stores only that blob, served to anyone because it's useless without the key (unknown usernames get a stable fake). The key itself lives only inside the encrypted vault, so Settings can show it and a passphrase change re-wraps the new key. A change that can't re-wrap it deletes the stale blob. A device with Face ID on can also reset the passphrase, since its passkey releases the raw key. |
 | Phone left unlocked | Auto-lock after 1, 2, 5 or 15 minutes idle, and after more than a minute in the background. Locking drops the key and wipes the DOM. |
 | Malicious script | Strict CSP: `script-src 'self'`, `connect-src 'self' https://api.github.com` (the sync API is same-origin), no inline scripts, and pdf.js vendored rather than loaded from a CDN. Statement text is HTML-escaped everywhere. |
 | GitHub token theft | Optional. It's a fine-grained token for one repo with Contents read/write, stored in localStorage **encrypted with the vault key**. |
@@ -69,9 +83,9 @@ Anything else is flagged in red, and importing it needs an explicit *Import anyw
 - `js/app.js`: boot, lock/unlock, auto-lock, tabs; `js/state.js` holds in-memory state
 - `js/crypto.js`: WebCrypto vault format; `js/store.js` handles repo, account and local copies, the GitHub API and export
 - `js/cloud.js`: account sign-up, sign-in and sync client; `worker/index.js`: the sync API (Cloudflare Worker + D1)
-- `js/cibc-parser.js`, `js/pdf-text.js`, `js/categorize.js`, `js/ledger.js`: pure logic shared with the Node tools and tests
+- `js/statements.js` (one entry point for every file), `js/cibc-parser.js`, `js/generic-parser.js`, `js/file-formats.js`, `js/parse-util.js`, `js/pdf-text.js`, `js/categorize.js`, `js/ledger.js`: pure logic shared with the Node tools and tests
 - `js/ui.js` (sheets, alerts, haptics) and `js/charts.js` (balance scrubber, stacked columns, rings)
 - `js/views/*`: one file per tab plus sheets, the importer and settings
 - `sw.js`, `manifest.webmanifest`, `icons/`: installable PWA that works offline
 - `tools/vault.mjs`: command-line check, import and report; `tools/make-icons.mjs`; `tools/vendor-pdfjs.mjs`
-- `tests/`: parser, reconciliation, crypto and privacy tests against synthetic CIBC-layout PDFs; `tests/cloud.mjs` runs the sync API against an in-memory D1
+- `tests/`: parser, reconciliation, crypto and privacy tests against synthetic CIBC-layout PDFs, other banks' layouts (UK, US, German, Indian, credit card) and CSV/OFX/QIF exports; `tests/cloud.mjs` runs the sync API (including recovery) against an in-memory D1

@@ -101,19 +101,23 @@ export async function enroll(keyBits, env, who) {
   ls.set(who, { v: 1, credentialId: b64(id), iv: b64(iv), ct: b64(ct), salt: env.kdf.salt, createdAt: new Date().toISOString() });
 }
 
-/** Ask for Face ID / Touch ID and return a vault session { key, salt, iterations }. */
-export async function unlock(env, id) {
+/** Ask for Face ID / Touch ID and return the raw vault-key bytes (the caller wipes them). */
+export async function unlockBits(env, id) {
   const e = ls.get(id);
   if (!e || e.salt !== env.kdf.salt) throw new Error('NOT_ENROLLED');
   const out = await evaluate(unb64(e.credentialId));
-  let bits;
   try {
-    bits = new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: unb64(e.iv), additionalData: enc.encode(e.salt) }, await wrapKey(out), unb64(e.ct)));
+    return new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: unb64(e.iv), additionalData: enc.encode(e.salt) }, await wrapKey(out), unb64(e.ct)));
   } catch {
     throw new Error('WRAP_INVALID');
   } finally {
     out.fill(0);
   }
+}
+
+/** Ask for Face ID / Touch ID and return a vault session { key, salt, iterations }. */
+export async function unlock(env, id) {
+  const bits = await unlockBits(env, id);
   const key = await subtle.importKey('raw', bits, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   bits.fill(0);
   return { key, salt: env.kdf.salt, iterations: env.kdf.iterations };

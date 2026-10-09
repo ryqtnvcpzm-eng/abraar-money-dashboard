@@ -11,6 +11,11 @@ import { parseCibcStatement, reconcile, parseSummary } from '../js/cibc-parser.j
 import { compileRules, cleanName, sanitizeDescription, categorize } from '../js/categorize.js';
 import { emptyVault, prepareImport, commitImport, buildModel, flow, spendByCategory, dailyBalance, planFromTemplate, planTargets, insights } from '../js/ledger.js';
 import { createSession, seal, open } from '../js/crypto.js';
+import { scanDate, parseMoney, resolveOrder } from '../js/parse-util.js';
+import { parseGenericStatement } from '../js/generic-parser.js';
+import { readStatementFile, parseLoaded, loadFile } from '../js/statements.js';
+import { FIXTURES } from './fixtures-generic.mjs';
+import { EXPORTS } from './fixtures-exports.mjs';
 
 let passed = 0;
 const failures = [];
@@ -79,6 +84,88 @@ await test('seal/open round trip, wrong passphrase rejected, tampering rejected'
   await assert.rejects(open(env, 'wrong passphrase'), /WRONG_PASSPHRASE/);
   await assert.rejects(open({ ...env, rev: 4 }, 'correct horse battery staple'), /WRONG_PASSPHRASE/);
   assert.ok(!JSON.stringify(env).includes('world'));
+});
+
+
+console.log('Statements from any bank');
+await test('dates in many formats and languages', () => {
+  const d = (t) => { const x = scanDate(t); return x && !x.ambiguous ? [x.y, x.m, x.d] : x; };
+  assert.deepEqual(d('31/01/2026 X'), [2026, 1, 31]);
+  assert.deepEqual(d('2026-01-31'), [2026, 1, 31]);
+  assert.deepEqual(d('Jan 31, 2026'), [2026, 1, 31]);
+  assert.deepEqual(d('31 Jan 2026'), [2026, 1, 31]);
+  assert.deepEqual(d('31-JAN-26'), [2026, 1, 31]);
+  assert.deepEqual(d('12 de enero de 2026'), [2026, 1, 12]);
+  assert.deepEqual(d('3 févr. 2026'), [2026, 2, 3]);
+  assert.deepEqual(d('31. März 2026'), [2026, 3, 31]);
+  assert.deepEqual([scanDate('01.07. 01.07. Miete').a, scanDate('01.07. 01.07. Miete').b, scanDate('01.07. 01.07. Miete').y], [1, 7, null]);
+  assert.equal(scanDate('12.50'), null);
+  assert.equal(scanDate('Main Street'), null);
+  assert.equal(scanDate('05/03').ambiguous, true);
+  assert.equal(resolveOrder([scanDate('05/03'), scanDate('02/13')]).order, 'mdy');
+  assert.equal(resolveOrder([scanDate('05/03'), scanDate('13/02')]).order, 'dmy');
+});
+await test('amounts in many formats', () => {
+  const v = (t, dec) => parseMoney(t, dec).value;
+  assert.equal(v('1,234.56'), 1234.56);
+  assert.equal(v('1.234,56', ','), 1234.56);
+  assert.equal(v('1 234,56', ','), 1234.56);
+  assert.equal(v("1'234.56"), 1234.56);
+  assert.equal(v('(45.00)'), -45);
+  assert.equal(v('45.00-'), -45);
+  assert.equal(v('45.00 DR'), -45);
+  assert.equal(v('12.00 CR'), 12);
+  assert.equal(v('-$12.00'), -12);
+  assert.equal(v('€1.234,56', ','), 1234.56);
+});
+for (const f of FIXTURES) {
+  await test(`PDF layout: ${f.name}`, () => {
+    const r = parseGenericStatement(f.pages);
+    const e = f.expect;
+    assert.deepEqual([r.period.start, r.period.end], e.period);
+    assert.equal(r.opening, e.opening);
+    assert.equal(r.closing, e.closing);
+    assert.deepEqual(r.transactions.map((t) => t.amount), e.amounts);
+    if (e.dates) assert.deepEqual(r.transactions.map((t) => t.date), e.dates);
+    if (e.currency) assert.equal(r.meta.currency, e.currency);
+    if (e.descIncludes) assert.ok(r.transactions.some((t) => t.description.includes(e.descIncludes)));
+    assert.equal(reconcile(r).ok, true, reconcile(r).issues.join('; '));
+  });
+}
+await test('the fix-it switches flip money in/out and the day/month order', () => {
+  // No running balance to prove the direction: the switch flips every line.
+  const de = FIXTURES[2];
+  const flipped = parseGenericStatement(de.pages, { flip: true });
+  assert.deepEqual(flipped.transactions.map((t) => t.amount), de.expect.amounts.map((a) => -a));
+  // With running balances the balance wins, whatever the switch says.
+  const us = FIXTURES[1];
+  assert.deepEqual(parseGenericStatement(us.pages, { flip: true }).transactions.map((t) => t.amount), us.expect.amounts);
+  const csv = EXPORTS[0];
+  const file = { kind: 'csv', name: csv.name, text: csv.text };
+  const dmy = parseLoaded(file, { dateOrder: 'dmy' });
+  assert.ok(dmy.length > 0 && dmy.every((s) => s.meta.dateOrder === 'dmy'));
+});
+for (const f of EXPORTS) {
+  await test(`Export: ${f.label}`, async () => {
+    const r = await readStatementFile({ name: f.name, bytes: new TextEncoder().encode(f.text) });
+    assert.deepEqual(r.statements.map((s) => s.period.end.slice(0, 7)), f.expect.months);
+    for (const st of r.statements) {
+      const ym = st.period.end.slice(0, 7);
+      assert.deepEqual(st.transactions.map((t) => t.amount), f.expect.amounts[ym], ym);
+      if (f.expect.opening?.[ym] != null) assert.equal(st.opening, f.expect.opening[ym]);
+      if (f.expect.closing?.[ym] != null) assert.equal(st.closing, f.expect.closing[ym]);
+      assert.equal(reconcile(st).ok, f.expect.verified, reconcile(st).issues.join('; '));
+      if (f.expect.currency) assert.equal(st.meta.currency, f.expect.currency);
+    }
+    const vault = emptyVault();
+    for (const st of r.statements) commitImport(vault, prepareImport(vault, st, compiled));
+    assert.equal(vault.transactions.length, Object.values(f.expect.amounts).flat().length);
+    assert.ok(!/\d{6,}/.test(JSON.stringify(vault.transactions.map((t) => t.merchant))), 'no account-like numbers stored');
+  });
+}
+await test('a scanned PDF (no text) gets a helpful message', async () => {
+  const fakePdf = { getDocument: () => ({ promise: Promise.resolve({ numPages: 1, getPage: async () => ({ getTextContent: async () => ({ items: [] }), cleanup() {} }) }), destroy: async () => {} }) };
+  await assert.rejects(loadFile({ name: 'scan.pdf', bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }, { pdfjs: fakePdf }), /scanned image/);
 });
 
 console.log('PDF import (synthetic statements)');
@@ -165,6 +252,30 @@ try {
     vault.plan = plan;
     assert.ok(insights(buildModel(vault, compiled), '2026-10-07').length >= 3);
   });
+
+  await test('the general reader reads CIBC layouts exactly like the CIBC reader', async () => {
+    for (const f of readdirSync(dir).filter((x) => x.endsWith('.pdf'))) {
+      const pages = await pdfToPages(pdfjs, new Uint8Array(readFileSync(join(dir, f))));
+      const g = parseGenericStatement(pages);
+      const c = parseCibcStatement(pages);
+      assert.equal(reconcile(g).ok, true, f);
+      assert.deepEqual(g.transactions.map((t) => [t.date, t.amount, t.description]), c.transactions.map((t) => [t.date, t.amount, t.description]), f);
+    }
+  });
+
+  const world = execFileSync('python3', ['-I', new URL('./make_world_statements.py', import.meta.url).pathname, dir], { encoding: 'utf8' });
+  for (const line of world.trim().split('\n')) {
+    const [file, id, o, c, n] = line.split(' ');
+    await test(`real PDF from another bank: ${file}`, async () => {
+      const r = await readStatementFile({ name: file, bytes: new Uint8Array(readFileSync(join(dir, file))) }, { pdfjs });
+      const st = r.statements[0];
+      assert.equal(st.period.end.slice(0, 7), id);
+      assert.equal(st.opening, +o);
+      assert.equal(st.closing, +c);
+      assert.equal(st.transactions.length, +n);
+      assert.equal(reconcile(st).ok, true, reconcile(st).issues.join('; '));
+    });
+  }
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

@@ -347,14 +347,17 @@ export function reconcile(st) {
     checks.push({ label, statement, computed: computed / 100, ok });
     if (ok === false) issues.push(`${label}: statement says ${statement.toFixed(2)}, transactions add up to ${(computed / 100).toFixed(2)} (off by ${((computed - cents(statement)) / 100).toFixed(2)})`);
   };
-  if (st.opening == null) issues.push('Could not find the opening balance.');
-  if (st.closing == null) issues.push('Could not find the closing balance.');
+  // Nothing printed to check against (e.g. a CSV export without a balance column): "not checked", not "wrong".
+  const unverified = !!st.meta?.unverified;
+  if (st.opening == null && !unverified) issues.push('Could not find the opening balance.');
+  if (st.closing == null && !unverified) issues.push('Could not find the closing balance.');
   if (!st.period) issues.push('Could not find the statement period.');
   add('Withdrawals', st.summaryTotals?.withdrawals, wd);
   add('Deposits', st.summaryTotals?.deposits, dep);
   if (st.opening != null) add('Closing balance', st.closing, cents(st.opening) + dep - wd);
-  for (const b of st.balanceIssues || []) issues.push(`Running balance differs on ${b.date} (“${b.description.slice(0, 40)}”): expected ${b.expected.toFixed(2)}, statement shows ${b.printed.toFixed(2)}`);
+  for (const b of st.balanceIssues || []) issues.push(`Running balance differs on ${b.date} (“${b.description.slice(0, 40)}”): expected ${b.expected?.toFixed(2) ?? '?'}, statement shows ${b.printed.toFixed(2)}`);
   if (!st.transactions.length) issues.push('No transactions found.');
-  const ok = issues.length === 0 && checks.every((c) => c.ok !== false);
+  let ok = issues.length === 0 && checks.every((c) => c.ok !== false);
+  if (ok && unverified) ok = null;
   return { ok, checks, issues, totals: { withdrawals: wd / 100, deposits: dep / 100 } };
 }

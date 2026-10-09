@@ -545,3 +545,10 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
 @media (forced-colors: active) {
   .stackbar i, .pctbar i, .budget-row .bar i { forced-color-adjust: none; }
 }
+
+/* Recovery key */
+.recovery-code { display: grid; grid-template-columns: repeat(3, auto); justify-content: center; gap: 8px 14px; margin: 6px auto 14px; padding: 18px 16px; max-width: 360px; border-radius: 16px; background: var(--bg-2); box-shadow: 0 0 0 0.5px var(--separator) inset; font: 600 22px/1.2 ui-monospace, 'SF Mono', Menlo, monospace; letter-spacing: 0.06em; color: var(--label); user-select: all; -webkit-user-select: all; }
+.recovery-actions { display: flex; gap: 8px; }
+.recovery-actions .btn { flex: 1; min-width: 0; padding-left: 8px; padding-right: 8px; }
+.field.mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; letter-spacing: 0.04em; text-transform: uppercase; }
+.field.mono::placeholder { text-transform: none; letter-spacing: 0; font-family: var(--font); }

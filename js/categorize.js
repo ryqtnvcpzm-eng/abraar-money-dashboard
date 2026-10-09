@@ -24,7 +24,17 @@ export function sanitizeDescription(s) {
     .trim();
 }
 
-const PREFIX_RE = new RegExp('^(?:' + TYPE_PREFIXES.map((p) => p.replace(/[-]/g, '[- ]?').replace(/\s+/g, '\\s*')).join('|') + ')\\b[\\s:-]*', 'i');
+// Transaction-type words other banks print before the merchant (UK, US, India, Europe).
+const WORLD_PREFIXES = [
+  'CARD PAYMENT TO', 'CARD PAYMENT', 'CARD PURCHASE', 'DEBIT CARD PURCHASE', 'DEBIT CARD', 'POS PURCHASE', 'POS DEBIT', 'POS',
+  'CONTACTLESS PAYMENT', 'DIRECT DEBIT', 'STANDING ORDER', 'BANK GIRO CREDIT', 'FASTER PAYMENT', 'BILL PAYMENT TO', 'TRANSFER TO',
+  'ACH DEBIT', 'ACH CREDIT', 'ACH DEPOSIT', 'ACH', 'CHECKCARD', 'PURCHASE AUTHORIZED ON', 'RECURRING PAYMENT',
+  'UPI', 'NEFT CR', 'NEFT DR', 'NEFT', 'IMPS', 'RTGS',
+  'KARTENZAHLUNG', 'LASTSCHRIFT', 'GUTSCHRIFT', 'UBERWEISUNG', 'ÜBERWEISUNG', 'DAUERAUFTRAG',
+  'PAIEMENT PAR CARTE', 'PAIEMENT CB', 'PRELEVEMENT', 'PRÉLÈVEMENT', 'VIREMENT', 'CARTE',
+  'COMPRA CON TARJETA', 'COMPRA', 'PAGO CON TARJETA', 'PAGO', 'RECIBO', 'TRANSFERENCIA', 'PAGAMENTO POS', 'PAGAMENTO', 'BONIFICO',
+];
+const PREFIX_RE = new RegExp('^(?:' + [...TYPE_PREFIXES, ...WORLD_PREFIXES].sort((a, b) => b.length - a.length).map((p) => p.replace(/[-]/g, '[- ]?').replace(/\s+/g, '\\s*')).join('|') + ')\\b[\\s:-]*', 'i');
 
 function titleCase(s) {
   return s
@@ -44,6 +54,9 @@ function titleCase(s) {
 
 /** "VISA DEBIT RETAIL PURCHASE DOLLARAMA #123 MONTREAL QC" -> "Dollarama" */
 export function cleanName(description) {
+  // CSV exports join several columns with " · ", payee first: name after the first part that has letters.
+  const parts = String(description).split(' · ').filter((p) => /\p{L}{2}/u.test(p));
+  if (parts.length > 1) description = parts[0];
   let s = sanitizeDescription(description).toUpperCase();
   const typeOnly = s;
   for (let i = 0; i < 3; i++) {

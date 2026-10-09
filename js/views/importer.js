@@ -1,10 +1,11 @@
-// Add Statement: read CIBC PDFs on this device with pdf.js, reconcile, dedupe, categorize, then encrypt.
+// Add Statements: read statement files from any bank on this device, reconcile, dedupe, categorize, then encrypt.
+// PDFs go through pdf.js; CSV / OFX / QFX / QIF downloads are read as text. Nothing is uploaded.
 import { app } from '../state.js';
-import { money, monthLabel, esc, plural } from '../format.js';
-import { parseCibcStatement } from '../cibc-parser.js';
-import { pdfToPages } from '../pdf-text.js';
+import { money, monthLabel, dateLabel, esc, plural } from '../format.js';
+import { loadFile, parseLoaded, ACCEPT, isStatementFile, describeSource } from '../statements.js';
 import { prepareImport, commitImport } from '../ledger.js';
 import { icon, openSheet, haptic, toast } from '../ui.js';
+import { statusChip } from './settings.js';
 
 let pdfjs = null;
 async function loadPdfjs() {
@@ -16,9 +17,32 @@ async function loadPdfjs() {
 }
 
 export function openImporter({ welcome = false } = {}) {
-  const items = []; // { name, status, error, parsed, prep, include }
+  // files: { name, status: 'reading'|'ready'|'error', error, loaded, options, statements: [{ parsed, prep, include, touched }] }
+  const files = [];
   let done = null;
   const sheet = openSheet({ title: 'Add Statements', size: 'full', body: '' });
+  const statements = () => files.flatMap((f, fi) => (f.status === 'ready' ? f.statements.map((s, si) => ({ ...s, f, fi, si })) : []));
+
+  /** Re-check every statement against the vault and against each other (duplicates across files). */
+  function prepareAll() {
+    const work = structuredClone(app.vault);
+    const list = statements().sort((a, b) => (a.parsed.period.end < b.parsed.period.end ? -1 : 1));
+    const seen = new Set();
+    for (const s of list) {
+      const st = s.f.statements[s.si];
+      const prep = prepareImport(work, st.parsed, app.rules);
+      prep.alreadyImported = app.vault.statements.some((x) => x.id === prep.id);
+      prep.sameBatch = seen.has(prep.id);
+      seen.add(prep.id);
+      st.prep = prep;
+      if (!st.touched) {
+        const ok = prep.reconciliation.ok;
+        const existing = app.vault.statements.find((x) => x.id === prep.id);
+        st.include = !prep.sameBatch && ok !== false && (!existing || prep.parsedCount >= existing.count);
+      }
+      if (st.include && !prep.sameBatch) commitImport(work, prep);
+    }
+  }
 
   const draw = () => {
     if (done) {
@@ -39,102 +63,159 @@ export function openImporter({ welcome = false } = {}) {
         </div>`}`);
       return;
     }
-    const ready = items.filter((i) => i.status === 'ready' && i.include);
+    const all = statements().sort((a, b) => (a.prep?.id || '').localeCompare(b.prep?.id || ''));
+    const ready = all.filter((s) => s.include && !s.prep.sameBatch);
+    const pendingOrErr = files.filter((f) => f.status !== 'ready');
     sheet.setBody(`
-      ${!items.length ? `
+      ${!files.length ? `
         <div class="sheet-hero" style="padding-top:18px">
           <span class="cat-icon lg" style="--c:var(--blue)">${icon('doc')}</span>
-          <div class="name">${welcome ? 'Welcome! Add your statements' : 'Add CIBC Statements'}</div>
-          <p class="when" style="max-width:340px;margin:8px auto 0">Choose one or more PDF statements. They’re read right here on your device. Nothing is uploaded, and the PDF itself isn’t kept.</p>
+          <div class="name">${welcome ? 'Welcome! Add your statements' : 'Add Statements'}</div>
+          <p class="when" style="max-width:350px;margin:8px auto 0">PDF statements from any bank, or the CSV, OFX or QIF file your online banking lets you download. They’re read right here on your device. Nothing is uploaded, and the file itself isn’t kept.</p>
         </div>` : ''}
-      <label class="btn ${items.length ? 'secondary' : ''}" style="margin-top:8px">
-        ${icon('plus')} ${items.length ? 'Choose More PDFs' : 'Choose PDFs'}
-        <input type="file" accept="application/pdf,.pdf" multiple hidden id="imp-file">
+      <label class="btn ${files.length ? 'secondary' : ''}" style="margin-top:8px">
+        ${icon('plus')} ${files.length ? 'Choose More Files' : 'Choose Files'}
+        <input type="file" accept="${ACCEPT}" multiple hidden id="imp-file">
       </label>
-      <div id="imp-items">${items.map((it, i) => [it, i]).sort((a, b) => (a[0].prep?.id || '9999').localeCompare(b[0].prep?.id || '9999')).map(([it, i]) => card(it, i)).join('')}</div>
-      ${items.length ? `<div class="btn-row" style="position:sticky;bottom:0;padding:12px 0 4px;background:linear-gradient(transparent,var(--sheet-bg) 30%)">
+      ${pendingOrErr.map(fileCard).join('')}
+      <div id="imp-items">${all.map(card).join('')}</div>
+      ${all.length ? `<div class="btn-row" style="position:sticky;bottom:0;padding:12px 0 4px;background:linear-gradient(transparent,var(--sheet-bg) 30%)">
         <button class="btn" data-act="commit" ${ready.length ? '' : 'disabled'}>${ready.length ? `Add ${plural(ready.length, 'Statement')}` : 'Nothing to add yet'}</button></div>` : ''}
-      <p class="list-foot">Each statement is checked: opening balance + deposits − withdrawals must equal the closing balance, and totals must match the bank’s summary. Reversals and waived fees are netted out automatically.</p>`);
+      <p class="list-foot">Each statement is checked: opening balance + deposits − withdrawals must equal the closing balance, and every running balance must add up. Money in and out is read from the columns, signs and balances. Reversals and waived fees are netted out automatically.</p>`);
   };
 
-  const card = (it, i) => {
-    if (it.status === 'reading') return `<div class="list" style="margin-top:14px"><div class="row"><span class="spinner dark"></span><span class="main"><span class="title">${esc(it.name)}</span><span class="subtitle">Reading…</span></span></div></div>`;
-    if (it.status === 'error') return `<div class="list" style="margin-top:14px"><div class="row with-icon"><span class="cat-icon sm" style="--c:var(--red)">${icon('warn')}</span><span class="main"><span class="title">${esc(it.name)}</span><span class="subtitle" style="white-space:normal">${esc(it.error)}</span></span></div></div>`;
-    const p = it.prep;
+  const fileCard = (f) => {
+    if (f.status === 'reading') return `<div class="list" style="margin-top:14px"><div class="row"><span class="spinner dark"></span><span class="main"><span class="title">${esc(f.name)}</span><span class="subtitle">Reading…</span></span></div></div>`;
+    return `<div class="list" style="margin-top:14px"><div class="row with-icon"><span class="cat-icon sm" style="--c:var(--red)">${icon('warn')}</span><span class="main"><span class="title">${esc(f.name)}</span><span class="subtitle" style="white-space:normal">${esc(f.error)}</span></span></div></div>`;
+  };
+
+  const card = (s) => {
+    const p = s.prep;
     const rec = p.reconciliation;
-    const chip = rec.ok ? '<span class="chip ok">Reconciled</span>' : '<span class="chip bad">Doesn’t match</span>';
+    const meta = p.meta || {};
+    const key = `${s.fi}:${s.si}`;
     const find = (label) => rec.checks.find((c) => c.label === label);
     const line = (label, stmt, found, ok) => `<div class="row"><span class="main"><span class="title">${label}</span></span>
-      <span class="value-sub" style="text-align:right">${stmt != null ? money(stmt) : '—'}${found != null && ok === false ? `<br><span class="neg">found ${money(found)}</span>` : ''}</span>
+      <span class="value-sub" style="text-align:right">${stmt != null ? money(stmt) : found != null ? money(found) : '—'}${found != null && ok === false ? `<br><span class="neg">found ${money(found)}</span>` : ''}</span>
       <span style="color:var(--${ok === false ? 'red' : ok ? 'green' : 'gray'});width:20px">${icon(ok === false ? 'close' : ok ? 'check' : 'ellipsis')}</span></div>`;
-    return `<div class="list-head"><span>${esc(p.label)}</span>${chip}</div>
+    const notes = [];
+    if (meta.partial) notes.push(`Covers ${dateLabel(p.period.start, 'short')} – ${dateLabel(p.period.end, 'short')} only.`);
+    if (meta.unverified && !meta.derivedBalances) notes.push('This file has no balances, so it can’t be checked against the bank. Glance over the transactions before adding.');
+    if (meta.derivedBalances) notes.push('Balances worked out from the end balance in the file.');
+    if (meta.signSource === 'keywords' && !rec.ok) notes.push('Money in vs out was worked out from the descriptions. Check a few in Review.');
+    if (meta.dateOrderCertain === false) notes.push(`Dates read as ${meta.dateOrder === 'mdy' ? 'month/day' : 'day/month'}. Change it in Review if that’s wrong.`);
+    if (p.sameBatch) notes.push(`${monthLabel(p.id)} is already in this batch from another file.`);
+    return `<div class="list-head"><span>${esc(p.label)}</span>${statusChip(rec.ok)}</div>
       <div class="list">
+        <div class="row"><span class="main"><span class="title">${esc(describeSource(meta))}</span><span class="subtitle">${esc(s.f.name)}</span></span></div>
         ${line('Opening balance', p.opening, null, p.opening != null ? true : null)}
-        ${line('Withdrawals', p.summaryTotals.withdrawals, find('Withdrawals')?.computed, find('Withdrawals')?.ok)}
-        ${line('Deposits', p.summaryTotals.deposits, find('Deposits')?.computed, find('Deposits')?.ok)}
+        ${line('Withdrawals', p.summaryTotals?.withdrawals, find('Withdrawals')?.computed, find('Withdrawals')?.ok)}
+        ${line('Deposits', p.summaryTotals?.deposits, find('Deposits')?.computed, find('Deposits')?.ok)}
         ${line('Closing balance', p.closing, find('Closing balance')?.computed, find('Closing balance')?.ok)}
-        <div class="row"><span class="main"><span class="title">${plural(p.transactions.length, 'transaction')}</span>
-          <span class="subtitle">${p.duplicates ? `${plural(p.duplicates, 'duplicate')} skipped · ` : ''}${esc(it.name)}</span></span></div>
-        ${rec.issues.map((x) => `<div class="row"><span class="main"><span class="subtitle neg" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
-        ${p.warnings.slice(0, 3).map((x) => `<div class="row"><span class="main"><span class="subtitle" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
-        ${p.alreadyImported ? toggle(i, 'Replace the existing statement', 'Already imported. Replacing keeps your category changes.', it.include) : ''}
-        ${!rec.ok && !p.alreadyImported ? toggle(i, 'Import anyway', 'It will be flagged until it reconciles.', it.include) : ''}
+        <button class="row tap" data-review="${key}"><span class="main"><span class="title">Review ${plural(p.transactions.length, 'transaction')}</span>
+          <span class="subtitle">${p.duplicates ? `${plural(p.duplicates, 'duplicate')} skipped` : 'Dates, descriptions and amounts'}</span></span>${icon('chev-r', 'chev')}</button>
+        ${notes.map((x) => `<div class="row"><span class="main"><span class="subtitle" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
+        ${rec.issues.slice(0, 4).map((x) => `<div class="row"><span class="main"><span class="subtitle neg" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
+        ${(p.warnings || []).slice(0, 2).map((x) => `<div class="row"><span class="main"><span class="subtitle" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
+        ${p.sameBatch ? '' : p.alreadyImported ? toggle(key, 'Replace the existing statement', 'Already imported. Replacing keeps your category changes.', s.include)
+          : rec.ok === false ? toggle(key, 'Import anyway', 'It will be flagged until it reconciles.', s.include)
+          : toggle(key, 'Include', rec.ok ? 'Checked against the bank’s balances.' : 'Not checked: no balances in the file.', s.include)}
       </div>`;
   };
-  const toggle = (i, title, sub, on) => `<label class="row"><span class="main"><span class="title">${title}</span><span class="subtitle" style="white-space:normal">${sub}</span></span>
-    <span class="switch"><input type="checkbox" data-include="${i}" ${on ? 'checked' : ''} aria-label="${esc(title)}"><span></span></span></label>`;
+  const toggle = (key, title, sub, on) => `<label class="row"><span class="main"><span class="title">${title}</span><span class="subtitle" style="white-space:normal">${sub}</span></span>
+    <span class="switch"><input type="checkbox" data-include="${key}" ${on ? 'checked' : ''} aria-label="${esc(title)}"><span></span></span></label>`;
 
-  // Prepare each file against a working copy, so files in the same batch are de-duplicated against each other too.
-  const working = () => {
-    const v = structuredClone(app.vault);
-    for (const it of items) if (it.status === 'ready' && it.include) commitImport(v, it.prep);
-    return v;
-  };
+  function parseFile(f) {
+    const parsed = parseLoaded(f.loaded, f.options);
+    const prev = f.statements || [];
+    f.statements = parsed.map((p) => {
+      const old = prev.find((x) => x.parsed.period.end.slice(0, 7) === p.period.end.slice(0, 7));
+      return { parsed: p, prep: null, include: old?.include ?? true, touched: old?.touched ?? false };
+    });
+    f.status = 'ready';
+  }
 
-  async function addFiles(files) {
-    const list = [...files].filter((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
-    if (!list.length) return;
-    const lib = await loadPdfjs().catch(() => null);
-    for (const f of list) {
-      const it = { name: f.name, status: 'reading', include: true };
-      items.push(it);
+  async function addFiles(list) {
+    const chosen = [...list].filter(isStatementFile);
+    if (!chosen.length) { toast('Choose PDF, CSV, OFX or QIF files', { icon: 'warn', color: 'orange' }); return; }
+    const needsPdf = chosen.some((f) => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+    const lib = needsPdf ? await loadPdfjs().catch(() => null) : null;
+    for (const file of chosen) {
+      const f = { name: file.name, status: 'reading', options: {} };
+      files.push(f);
       draw();
-      if (!lib) { Object.assign(it, { status: 'error', error: 'Couldn’t load the PDF reader. Connect to the internet once so it can be cached.' }); continue; }
       try {
-        const pages = await pdfToPages(lib, new Uint8Array(await f.arrayBuffer()));
-        const parsed = parseCibcStatement(pages);
-        if (!parsed.period) throw new Error('Couldn’t find a statement period. Is this a CIBC account statement?');
-        if (!parsed.transactions.length) throw new Error('No transactions found in this PDF.');
-        const prep = prepareImport(working(), parsed, app.rules);
-        prep.alreadyImported = app.vault.statements.some((s) => s.id === prep.id);
-        if (items.some((x) => x !== it && x.prep?.id === prep.id)) throw new Error(`${monthLabel(prep.id)} is already in this batch.`);
-        Object.assign(it, { status: 'ready', parsed, prep, include: prep.reconciliation.ok || prep.alreadyImported });
-        if (prep.alreadyImported && !prep.reconciliation.ok) it.include = false;
-        haptic(prep.reconciliation.ok ? 'light' : 'error');
+        f.loaded = await loadFile({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }, { pdfjs: lib });
+        parseFile(f);
+        prepareAll();
+        haptic(f.statements.every((s) => s.prep.reconciliation.ok !== false) ? 'light' : 'error');
       } catch (e) {
-        const msg = e?.name === 'PasswordException' ? 'This PDF is password-protected. Open it once and save an unprotected copy.' : (e?.message || 'Couldn’t read this PDF.');
-        Object.assign(it, { status: 'error', error: msg });
+        Object.assign(f, { status: 'error', error: e?.message || 'Couldn’t read this file.' });
+        haptic('error');
       }
       draw();
     }
   }
 
+  function openReview(fi, si) {
+    const f = files[fi];
+    const rs = openSheet({ title: 'Review', size: 'full', body: '' });
+    const render = () => {
+      const s = f.statements[si] || f.statements[0];
+      const p = s.prep;
+      const meta = p.meta || {};
+      const signsProven = p.reconciliation.ok === true && meta.signSource !== 'keywords';
+      rs.setTitle(p.label);
+      rs.setBody(`
+        ${!signsProven || meta.dateOrderCertain === false ? `<div class="list-head"><span>If something looks off</span></div><div class="list">
+          ${!signsProven ? `<label class="row"><span class="main"><span class="title">Swap money in and out</span><span class="subtitle" style="white-space:normal">Use this if purchases show as money in.</span></span>
+            <span class="switch"><input type="checkbox" data-opt="flip" ${f.options.flip ? 'checked' : ''} aria-label="Swap money in and out"><span></span></span></label>` : ''}
+          ${meta.dateOrderCertain === false ? `<label class="row"><span class="main"><span class="title">Month comes first</span><span class="subtitle" style="white-space:normal">For dates like 03/04 meaning March 4. Off means 3 April.</span></span>
+            <span class="switch"><input type="checkbox" data-opt="mdy" ${meta.dateOrder === 'mdy' ? 'checked' : ''} aria-label="Month comes first"><span></span></span></label>` : ''}
+        </div>` : ''}
+        <div class="list-head"><span>${plural(p.transactions.length, 'transaction')}</span><span>${statusChip(p.reconciliation.ok)}</span></div>
+        <div class="list">${p.transactions.map((t) => `<div class="row"><span class="main"><span class="title">${esc(t.name || t.merchant)}</span>
+          <span class="subtitle">${esc(dateLabel(t.date, 'medium'))} · ${esc(t.merchant.slice(0, 60))}</span></span>
+          <span class="detail num ${t.amount > 0 ? 'pos' : ''}">${money(t.amount, { sign: true })}</span></div>`).join('')}</div>
+        <p class="list-foot">${signsProven ? 'Money in and out is confirmed by the running balance.' : 'Money in shows in green with a +.'} Nothing is saved until you tap Add.</p>`);
+    };
+    render();
+    rs.el.addEventListener('change', (e) => {
+      const opt = e.target.dataset.opt;
+      if (!opt) return;
+      haptic();
+      if (opt === 'flip') f.options = { ...f.options, flip: e.target.checked };
+      if (opt === 'mdy') f.options = { ...f.options, dateOrder: e.target.checked ? 'mdy' : 'dmy' };
+      try { parseFile(f); prepareAll(); } catch (ex) { toast(ex.message || 'Couldn’t re-read the file', { icon: 'warn', color: 'orange' }); }
+      render();
+      draw();
+    });
+  }
+
   draw();
   sheet.el.addEventListener('change', (e) => {
     if (e.target.id === 'imp-file') { addFiles(e.target.files); e.target.value = ''; }
-    if (e.target.dataset.include != null) { haptic(); items[+e.target.dataset.include].include = e.target.checked; draw(); }
+    if (e.target.dataset.include != null) {
+      haptic();
+      const [fi, si] = e.target.dataset.include.split(':').map(Number);
+      Object.assign(files[fi].statements[si], { include: e.target.checked, touched: true });
+      prepareAll();
+      draw();
+    }
   });
   sheet.el.addEventListener('dragover', (e) => { e.preventDefault(); });
   sheet.el.addEventListener('drop', (e) => { e.preventDefault(); addFiles(e.dataTransfer.files); });
   sheet.el.addEventListener('click', async (e) => {
+    const rev = e.target.closest('[data-review]');
+    if (rev) { haptic(); const [fi, si] = rev.dataset.review.split(':').map(Number); openReview(fi, si); return; }
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'commit') {
       haptic('heavy');
-      const chosen = items.filter((i) => i.status === 'ready' && i.include);
+      const chosen = statements().filter((s) => s.include && !s.prep.sameBatch).sort((a, b) => (a.parsed.period.end < b.parsed.period.end ? -1 : 1));
       let n = 0;
-      for (const it of chosen) {
+      for (const s of chosen) {
         // re-prepare against the live vault so duplicate checks reflect exactly what's being added
-        const prep = prepareImport(app.vault, it.parsed, app.rules);
+        const prep = prepareImport(app.vault, s.parsed, app.rules);
         commitImport(app.vault, prep);
         n += prep.transactions.length;
       }
