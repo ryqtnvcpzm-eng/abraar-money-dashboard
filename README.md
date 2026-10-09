@@ -136,6 +136,7 @@ Duplicates are skipped automatically. If you re-add a month, Money offers to rep
 
 ## Security notes
 
+- **Face ID / Touch ID** (iOS 18+ / macOS 15+): Settings → **Face ID** (or **Touch ID** on a Mac), then enter your passphrase once. Set it up separately on each device. It uses a passkey in iCloud Keychain (WebAuthn PRF) to keep an encrypted copy of the vault key on that device only. Your passphrase is never stored and always works. Changing the passphrase turns Face ID off until you turn it on again.
 - Auto-lock: after 5 minutes idle by default (Settings → Auto-Lock), and when the app has been in the background for over a minute.
 - Change your passphrase in Settings → **Change Passphrase**, then Save to GitHub.
 - **Forget This Device** removes the local encrypted copy and the token from that browser.

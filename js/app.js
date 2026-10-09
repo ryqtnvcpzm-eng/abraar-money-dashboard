@@ -2,6 +2,7 @@
 import { esc } from './format.js';
 import * as crypto from './crypto.js';
 import * as store from './store.js';
+import * as bio from './biometric.js';
 import { compileRules } from './categorize.js';
 import { emptyVault, buildModel } from './ledger.js';
 import { icon, haptic, toast, closeAllSheets, alertSheet } from './ui.js';
@@ -31,6 +32,7 @@ async function boot() {
   }
   const [remote, local] = [await store.fetchRemote() || await store.fetchRemoteCached(), store.loadLocal()];
   if (remote) store.setPublishedRev(Math.max(store.publishedRev(), remote.rev));
+  app.bioSupported = await bio.isSupported();
   const chosen = store.chooseVault(remote, local);
   app.env = chosen?.env || null;
   showLock();
@@ -45,12 +47,19 @@ function showLock(message = '') {
   lockEl.hidden = false;
   lockEl.classList.remove('leaving');
   if (app.env) {
-    lockLead.textContent = 'Enter your passphrase to unlock.';
+    // A passphrase change elsewhere gives the vault a new salt; the old biometric copy can't open it.
+    if (bio.enrollment() && !bio.isEnrolledFor(app.env)) {
+      bio.disable();
+      message ||= `${bio.label()} was turned off because your passphrase changed. Unlock once with it to turn ${bio.label()} back on in Settings.`;
+    }
+    const useBio = app.bioSupported && bio.isEnrolledFor(app.env);
+    lockLead.textContent = useBio ? `Unlock with ${bio.label()} or your passphrase.` : 'Enter your passphrase to unlock.';
     lockBody.innerHTML = `
+      ${useBio ? `<div class="btn-row" style="margin:0 0 18px"><button class="btn" type="button" id="bio-btn">${icon(bio.label() === 'Face ID' ? 'faceid' : 'touchid')} Unlock with ${esc(bio.label())}</button></div>` : ''}
       <form class="lock-form" id="unlock-form" autocomplete="off">
         <input type="text" name="username" value="money-vault" autocomplete="username" hidden>
         <input class="field" id="pass" type="password" autocomplete="current-password" placeholder="Passphrase" aria-label="Passphrase" required>
-        <button class="btn" type="submit" id="unlock-btn">Unlock</button>
+        <button class="btn ${useBio ? 'secondary' : ''}" type="submit" id="unlock-btn">${useBio ? 'Use Passphrase' : 'Unlock'}</button>
         <div class="err" id="lock-err" role="alert">${esc(message)}</div>
       </form>
       <div class="lock-links">
@@ -59,10 +68,39 @@ function showLock(message = '') {
       </div>`;
     const form = document.getElementById('unlock-form');
     const pass = document.getElementById('pass');
-    setTimeout(() => pass.focus(), 300);
+    const err = document.getElementById('lock-err');
+    if (useBio) {
+      const bioBtn = document.getElementById('bio-btn');
+      const tryBio = async () => {
+        bioBtn.disabled = true;
+        err.textContent = '';
+        try {
+          const session = await bio.unlock(app.env);
+          const data = await crypto.openWithSession(app.env, session);
+          enter({ session, vault: data, demo: false });
+        } catch (e) {
+          bioBtn.disabled = false;
+          if (e?.name === 'NotAllowedError' || e?.name === 'AbortError') return; // cancelled or timed out
+          if (e?.message === 'WRAP_INVALID' || e?.message === 'WRONG_PASSPHRASE') {
+            bio.disable();
+            err.textContent = `${bio.label()} couldn't unlock this vault, so it's been turned off. Use your passphrase.`;
+            document.getElementById('bio-btn')?.parentElement.remove();
+          } else {
+            err.textContent = `${bio.label()} didn't work this time. Use your passphrase.`;
+          }
+          haptic('error');
+        }
+      };
+      bioBtn.addEventListener('click', tryBio);
+      // Offer it straight away when the app opens (not right after the user locked it on purpose).
+      if (!app.bioPrompted && !message) { app.bioPrompted = true; setTimeout(tryBio, 350); }
+    } else {
+      setTimeout(() => pass.focus(), 300);
+    }
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = document.getElementById('unlock-btn');
+      const label = btn.textContent;
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>';
       try {
@@ -72,8 +110,8 @@ function showLock(message = '') {
       } catch {
         haptic('error');
         btn.disabled = false;
-        btn.textContent = 'Unlock';
-        document.getElementById('lock-err').textContent = 'Incorrect passphrase. Try again.';
+        btn.textContent = label;
+        err.textContent = 'Incorrect passphrase. Try again.';
         form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
         pass.select();
       }
@@ -200,6 +238,7 @@ app.rerender = () => { app.stale = new Set(Object.keys(VIEWS)); renderTab(app.ta
 
 function lock(reason = '') {
   if (!app.vault) return;
+  app.bioPrompted = true;
   app.session = null;
   app.vault = null;
   app.model = null;

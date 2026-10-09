@@ -44,6 +44,19 @@ export async function deriveKey(passphrase, salt, iterations = KDF_ITERATIONS) {
   );
 }
 
+/**
+ * The same key as deriveKey(), but as raw bytes — used only to enrol Face ID / Touch ID,
+ * which keeps a biometric-protected copy on the device. Callers must wipe the bytes after use.
+ */
+export async function deriveKeyBits(passphrase, salt, iterations = KDF_ITERATIONS) {
+  const base = await subtle.importKey('raw', enc.encode(passphrase.normalize('NFC')), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, base, 256));
+}
+/** Import raw key bytes as the (non-extractable) vault key. */
+export function keyFromBits(bits) {
+  return subtle.importKey('raw', bits, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
 function aad(h) {
   return enc.encode([h.format, h.v, h.rev, h.savedAt, h.kdf.iterations, h.kdf.salt].join('|'));
 }

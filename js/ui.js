@@ -8,6 +8,7 @@ export const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: r
 /** Light haptic tap. iOS 18+: toggling a switch-style checkbox through its label; elsewhere the Vibration API. */
 export function haptic(kind = 'light') {
   try {
+    if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
     if (navigator.vibrate) { navigator.vibrate(kind === 'heavy' ? 18 : kind === 'error' ? [12, 60, 12] : 8); return; }
     const label = document.getElementById('haptic');
     if (label) label.click();

@@ -5,7 +5,7 @@
 import { isEnvelope, sealString, openString } from './crypto.js';
 
 export const VAULT_PATH = 'data/vault.enc.json';
-const K = { local: 'money.vault', published: 'money.publishedRev', token: 'money.ghToken', gh: 'money.github', lockPref: 'money.autoLock' };
+const K = { local: 'money.vault', published: 'money.publishedRev', token: 'money.ghToken', gh: 'money.github', lockPref: 'money.autoLock', bio: 'money.bio' };
 
 const ls = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
