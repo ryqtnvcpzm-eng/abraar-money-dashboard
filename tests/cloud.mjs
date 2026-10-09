@@ -105,9 +105,66 @@ await test('an existing vault can move into an account', async () => {
   assert.equal((await cloud.signIn('abraar2', 'legacy vault passphrase ok')).vault.plan.note, 'legacy');
   await rejects(cloud.adoptVault({ invite: 'family-2026', username: 'abraar3', passphrase: 'not the right one at all', env: legacyEnv, vault: v }), 'WRONG_PASSPHRASE');
 });
+
+console.log('Forgot passphrase');
+let S;
+await test('new accounts come with a recovery key', async () => {
+  const v = emptyVault(); v.plan = { note: 'sis plan' };
+  S = await cloud.createAccount({ invite: 'family-2026', username: 'sis', passphrase: 'green kettle brave lantern', vault: v });
+  assert.match(S.recoveryKey, /^[0-9A-Z]{4}(-[0-9A-Z]{4}){5}$/);
+  const row = await env.DB.prepare('SELECT * FROM recovery WHERE username = ?').bind('sis').first();
+  assert.ok(row && !row.blob.includes(S.recoveryKey.replace(/-/g, '')), 'server must not see the key');
+});
+await test('the recovery key resets a forgotten passphrase', async () => {
+  const typed = S.recoveryKey.toLowerCase().replace(/-/g, ' ');
+  const r = await cloud.recoverWithKey('Sis', typed);
+  assert.equal(r.vault.plan.note, 'sis plan');
+  const res = await cloud.setPassphrase({ username: 'sis', oldToken: r.token, vault: r.vault, env: r.env, baseRev: r.env.rev, passphrase: 'violet harbor sleepy comet' });
+  assert.equal((await cloud.signIn('sis', 'violet harbor sleepy comet')).vault.plan.note, 'sis plan');
+  await rejects(cloud.signIn('sis', 'green kettle brave lantern'), 'wrong_credentials');
+  await rejects(cloud.pull('sis', S.token), 'unauthorized');
+  // …and the same recovery key still works after the reset.
+  assert.equal((await cloud.recoverWithKey('sis', S.recoveryKey)).token, res.token);
+});
+await test('a wrong or malformed recovery key is refused', async () => {
+  await rejects(cloud.recoverWithKey('sis', cloud.newRecoveryKey()), 'wrong_recovery_key');
+  await rejects(cloud.recoverWithKey('sis', 'abc'), 'bad_recovery_key');
+});
+await test('unknown usernames get a stable fake recovery blob', async () => {
+  const a = await (await fetch('api/v1/accounts/ghost-user/recovery')).json();
+  const b = await (await fetch('api/v1/accounts/ghost-user/recovery')).json();
+  assert.deepEqual(a, b);
+  assert.equal(a.recovery.v, 1);
+  await rejects(cloud.recoverWithKey('ghost-user', cloud.newRecoveryKey()), 'wrong_recovery_key');
+});
+await test('Face ID–style reset: raw key bytes open the account', async () => {
+  const { deriveKeyBits, unb64 } = await import('../js/crypto.js');
+  const kdf = await (await fetch('api/v1/accounts/sis/kdf')).json();
+  const bits = await deriveKeyBits('violet harbor sleepy comet', unb64(kdf.salt), kdf.iterations);
+  const r = await cloud.openWithBits('sis', bits);
+  assert.equal(r.vault.plan.note, 'sis plan');
+});
+await test('a new recovery key replaces the old one', async () => {
+  const { deriveKeyBits, unb64 } = await import('../js/crypto.js');
+  const r = await cloud.signIn('sis', 'violet harbor sleepy comet');
+  const bits = await deriveKeyBits('violet harbor sleepy comet', unb64(r.env.kdf.salt), r.env.kdf.iterations);
+  const code = await cloud.enableRecovery({ username: 'sis', token: r.token, bits });
+  await rejects(cloud.recoverWithKey('sis', S.recoveryKey), 'wrong_recovery_key');
+  assert.equal((await cloud.recoverWithKey('sis', code)).token, r.token);
+});
+await test('a passphrase change that can’t re-wrap the key drops the stale recovery blob', async () => {
+  const r = await cloud.signIn('sis', 'violet harbor sleepy comet');
+  const access = await cloud.deriveAccess('another passphrase entirely', 'BBBBBBBBBBBBBBBBBBBBBB==', 600000);
+  const next = await seal(access.session, { ...r.vault, sync: { ...r.vault.sync, token: access.token } }, r.env.rev + 1);
+  await cloud.push('sis', r.token, next, r.env.rev, { newToken: access.token });
+  assert.equal(await env.DB.prepare('SELECT * FROM recovery WHERE username = ?').bind('sis').first(), null);
+});
 await test('deleting an account removes it', async () => {
   await cloud.deleteAccount('brother', B.token);
   await rejects(cloud.pull('brother', B.token), 'unauthorized');
+  const s = await cloud.signIn('sis', 'another passphrase entirely');
+  await cloud.deleteAccount('sis', s.token);
+  assert.equal(await env.DB.prepare('SELECT * FROM recovery WHERE username = ?').bind('sis').first(), null);
 });
 
 console.log(`\n${passed} passed, ${failed.length} failed`);

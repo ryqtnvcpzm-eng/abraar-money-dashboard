@@ -6,6 +6,7 @@ import * as store from '../store.js';
 import * as bio from '../biometric.js';
 import * as cloud from '../cloud.js';
 import { icon, openSheet, haptic, toast, alertSheet } from '../ui.js';
+import { recoveryCardHTML, wireRecoveryCard } from './recovery.js';
 
 const row = (ic, color, title, { sub = '', detail = '', act = '', chev = true, cls = '' } = {}) => `
   <button class="row with-icon tap ${cls}" ${act ? `data-act="${act}"` : ''}>
@@ -29,6 +30,7 @@ export function openSettings() {
         <div class="row with-icon"><span class="avatar" style="--h:${hue(app.account)};width:34px;height:34px;font-size:15px">${esc(app.account.slice(0, 1).toUpperCase())}</span>
           <span class="main"><span class="title">@${esc(app.account)}</span><span class="subtitle">${dirty ? 'Changes waiting to sync' : `Synced ${esc(ago(store.syncedAt(app.account)))}`}</span></span></div>
         ${row('arrows', dirty ? 'orange' : 'green', 'Sync Now', { sub: 'Keeps your iPhone and Mac in step', act: 'sync', chev: false, cls: 'action' })}
+        ${row('key', v.recovery?.code ? 'green' : 'orange', 'Recovery Key', { sub: v.recovery?.code ? 'On · resets a forgotten passphrase' : 'Not set up · needed if you forget your passphrase', act: 'recovery' })}
         ${row('personIn', 'purple', 'Invite Someone', { sub: 'They get their own private account', act: 'invite' })}
         ${row('share', 'blue', 'Export Encrypted File', { sub: 'A backup copy you can keep', act: 'export', chev: false })}
       </div>
@@ -86,6 +88,7 @@ export function openSettings() {
     if (act === 'push') { await saveToRepo(); draw(); }
     if (act === 'sync') { await app.syncNow(); draw(); }
     if (act === 'invite') openInvite();
+    if (act === 'recovery') openRecovery(draw);
     if (act === 'migrate') openMigrate(draw);
     if (act === 'signout') {
       const ok = await alertSheet({ title: `Sign out @${app.account}?`, message: app.isDirty() ? 'Some changes haven’t synced yet and will be lost on this device.' : 'This device’s copy is removed. Sign in again any time.', actions: [{ label: 'Sign Out', value: true, style: 'destructive' }, { label: 'Cancel', value: false, style: 'cancel' }] });
@@ -177,6 +180,9 @@ function openGithub(onDone) {
   });
 }
 
+/** Reconciled / doesn't match / not checked (no balances in the file). */
+export const statusChip = (ok, badLabel = 'Doesn’t match') => (ok ? '<span class="chip ok">Reconciled</span>' : ok === false ? `<span class="chip bad">${badLabel}</span>` : '<span class="chip">Not checked</span>');
+
 export function openStatements() {
   const sheet = openSheet({ title: 'Statements', size: 'full', body: '' });
   const draw = () => {
@@ -184,11 +190,11 @@ export function openStatements() {
     sheet.setBody(list.length ? `
       <div class="list" style="margin-top:6px">${list.map((s) => `
         <button class="row tap" data-st="${esc(s.id)}">
-          <span class="main"><span class="title">${esc(monthLabel(s.id))}</span><span class="subtitle">${plural(s.count, 'transaction')} · closes at ${money(s.closing)}</span></span>
-          ${s.reconciled ? '<span class="chip ok">Reconciled</span>' : '<span class="chip bad">Check</span>'}${icon('chev-r', 'chev')}
+          <span class="main"><span class="title">${esc(monthLabel(s.id))}</span><span class="subtitle">${plural(s.count, 'transaction')}${s.closing != null ? ` · closes at ${money(s.closing)}` : ''}</span></span>
+          ${statusChip(s.reconciled, 'Check')}${icon('chev-r', 'chev')}
         </button>`).join('')}</div>
-      <p class="list-foot">Each statement: opening + deposits − withdrawals = closing, and both totals match the bank’s summary to the cent.</p>`
-      : '<div class="empty"><h3>No statements</h3><p>Add a CIBC PDF to get started.</p></div>');
+      <p class="list-foot">Each statement: opening + deposits − withdrawals = closing, and both totals match the bank’s summary to the cent. Files without balances (some CSV downloads) can’t be checked.</p>`
+      : '<div class="empty"><h3>No statements</h3><p>Add a statement from your bank to get started.</p></div>');
   };
   draw();
   sheet.el.addEventListener('click', (e) => {
@@ -202,12 +208,12 @@ function openStatement(id, onChange) {
   const sheet = openSheet({
     title: monthLabel(id), size: 'auto',
     body: `
-      <div class="list-head"><span>${esc(dateLabel(s.start, 'short'))} – ${esc(dateLabel(s.end, 'long'))}</span>${s.reconciled ? '<span class="chip ok">Reconciled</span>' : '<span class="chip bad">Doesn’t match</span>'}</div>
+      <div class="list-head"><span>${esc(dateLabel(s.start, 'short'))} – ${esc(dateLabel(s.end, 'long'))}</span>${statusChip(s.reconciled, 'Doesn’t match')}</div>
       <div class="list">
-        <div class="row"><span class="main"><span class="title">Opening balance</span></span><span class="detail num">${money(s.opening)}</span></div>
+        <div class="row"><span class="main"><span class="title">Opening balance</span></span><span class="detail num">${s.opening != null ? money(s.opening) : '—'}</span></div>
         <div class="row"><span class="main"><span class="title">Deposits</span></span><span class="detail num">+${money(s.deposits)}</span></div>
         <div class="row"><span class="main"><span class="title">Withdrawals</span></span><span class="detail num">−${money(s.withdrawals)}</span></div>
-        <div class="row"><span class="main"><span class="title" style="font-weight:600">Closing balance</span></span><span class="detail num" style="color:var(--label);font-weight:600">${money(s.closing)}</span></div>
+        <div class="row"><span class="main"><span class="title" style="font-weight:600">Closing balance</span></span><span class="detail num" style="color:var(--label);font-weight:600">${s.closing != null ? money(s.closing) : '—'}</span></div>
       </div>
       <div class="list-head"><span>Checks</span></div>
       <div class="list">${(s.checks || []).map((c) => `<div class="row"><span class="main"><span class="title">${esc(c.label)}</span><span class="subtitle">Statement ${c.statement != null ? money(c.statement) : '—'} · found ${money(c.computed)}</span></span>
@@ -219,7 +225,7 @@ function openStatement(id, onChange) {
   });
   sheet.el.addEventListener('click', async (e) => {
     if (!e.target.closest('[data-act="remove"]')) return;
-    const ok = await alertSheet({ title: `Remove ${monthLabel(id)}?`, message: `Deletes its ${s.count} transactions from the vault. You can add the PDF again later.`, actions: [{ label: 'Remove', value: true, style: 'destructive' }, { label: 'Cancel', value: false, style: 'cancel' }] });
+    const ok = await alertSheet({ title: `Remove ${monthLabel(id)}?`, message: `Deletes its ${s.count} transactions from the vault. You can add the file again later.`, actions: [{ label: 'Remove', value: true, style: 'destructive' }, { label: 'Cancel', value: false, style: 'cancel' }] });
     if (!ok) return;
     app.vault.statements = app.vault.statements.filter((x) => x.id !== id);
     app.vault.transactions = app.vault.transactions.filter((t) => t.statement !== id);
@@ -305,18 +311,17 @@ function changePassphrase() {
     const hadBio = bio.enrollment(app.bioId());
     if (app.account) {
       // Cloud accounts: re-key, then upload first, so the server and this device never disagree.
-      const oldToken = app.vault.sync.token;
-      const salt = crypto.b64(crypto.randomBytes(16));
-      const access = await cloud.deriveAccess(g('#cp1'), salt, crypto.KDF_ITERATIONS);
-      const next = { ...app.vault, sync: { ...app.vault.sync, token: access.token } };
-      const env = await crypto.seal(access.session, next, (app.env.rev || 0) + 1);
+      let res;
       try {
-        await cloud.push(app.account, oldToken, env, store.syncedRev(app.account), { newToken: access.token });
+        res = await cloud.setPassphrase({ username: app.account, oldToken: app.vault.sync.token, vault: app.vault, env: app.env, baseRev: store.syncedRev(app.account), passphrase: g('#cp1') });
       } catch (ex) {
         haptic('error');
         err.textContent = ex.code === 'conflict' ? 'Another device saved changes. Sync first, then try again.' : ex.code === 'offline' ? 'Changing the passphrase needs an internet connection.' : 'Couldn’t change the passphrase. Try again.';
         btn.disabled = false; btn.textContent = 'Change Passphrase'; return;
       }
+      const access = { session: res.session };
+      const next = res.vault;
+      const env = res.env;
       app.session = access.session;
       app.vault = next;
       app.env = env;
@@ -418,7 +423,7 @@ function openInvite() {
         <div class="row"><span class="rank">3</span><span class="main"><span class="title" style="white-space:normal">They tap Create Account</span><span class="subtitle" style="white-space:normal">They choose their own username and passphrase, then add their statements.</span></span></div>
       </div>
       <div class="btn-row"><button class="btn" data-act="share">${icon('share')} Share Link</button><button class="btn secondary" data-act="copy">Copy Link</button></div>
-      <p class="list-foot">Statements are read for CIBC accounts. Other banks’ PDFs may not import correctly yet.</p>`,
+      <p class="list-foot">Money reads PDF statements from most banks, plus CSV, OFX and QIF downloads from online banking.</p>`,
   });
   sheet.el.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-act]')?.dataset.act;
@@ -478,6 +483,7 @@ function openMigrate(onDone) {
       app.rerender();
       onDone?.();
       toast(`Cloud sync is on for @${r.username}`, { icon: 'check', color: 'green' });
+      openRecovery(onDone, { fresh: true });
     } catch (ex) {
       haptic('error');
       err.textContent = ex.message === 'WRONG_PASSPHRASE' ? 'That passphrase doesn’t open this vault.'
@@ -485,4 +491,58 @@ function openMigrate(onDone) {
       btn.disabled = false; btn.textContent = 'Create Account & Move';
     }
   });
+}
+
+/** Settings → Recovery Key: see it, or make one (needs the passphrase to reach the raw key). */
+function openRecovery(onDone, { fresh = false } = {}) {
+  const sheet = openSheet({ title: 'Recovery Key', size: 'full', body: '' });
+  const draw = () => {
+    const rk = app.vault.recovery;
+    sheet.setBody(`
+      <div class="sheet-hero" style="padding-top:12px">
+        <span class="cat-icon lg" style="--c:var(--${rk?.code ? 'green' : 'orange'})">${icon('key')}</span>
+        <div class="name">${rk?.code ? (fresh ? 'Save your recovery key' : 'Your recovery key') : 'Set up a recovery key'}</div>
+        <p class="when" style="max-width:350px;margin:8px auto 0">If you forget your passphrase, tap <b>Forgot passphrase?</b> on the lock screen and enter this key to set a new one. Without it, nobody can get your data back, not even whoever runs the site.</p>
+      </div>
+      ${rk?.code ? `${recoveryCardHTML(rk.code)}
+        <p class="list-foot">Created ${esc(dateLabel(rk.createdAt.slice(0, 10), 'long'))}. Keep it somewhere safe, like your password manager. Anyone with it and your username could reset your passphrase.</p>
+        <div class="list-head"><span>Lost it, or think someone saw it?</span></div>` : ''}
+      <form class="lock-form" id="rk-form" autocomplete="off">
+        <input type="text" name="username" value="${esc(app.account)}" autocomplete="username" hidden>
+        <input class="field" type="password" id="rk-pass" placeholder="Your passphrase" autocomplete="current-password" required aria-label="Passphrase">
+        <button class="btn ${rk?.code ? 'secondary' : ''}" type="submit" id="rk-go">${rk?.code ? 'Make a New Key' : 'Create Recovery Key'}</button>
+        <div class="err" id="rk-err" role="alert"></div>
+      </form>
+      ${rk?.code ? '<p class="list-foot">A new key replaces this one straight away.</p>' : ''}`);
+    if (rk?.code) wireRecoveryCard(sheet.body, rk.code, app.account);
+    sheet.el.querySelector('#rk-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = sheet.el.querySelector('#rk-err');
+      const btn = sheet.el.querySelector('#rk-go');
+      const label = btn.textContent;
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+      let bits;
+      try {
+        bits = await crypto.deriveKeyBits(sheet.el.querySelector('#rk-pass').value, crypto.unb64(app.env.kdf.salt), app.env.kdf.iterations);
+        await crypto.openWithSession(app.env, { key: await crypto.keyFromBits(bits) }); // checks the passphrase
+      } catch {
+        bits?.fill(0);
+        haptic('error'); err.textContent = 'Incorrect passphrase.'; btn.disabled = false; btn.textContent = label; return;
+      }
+      try {
+        const code = await cloud.enableRecovery({ username: app.account, token: app.vault.sync.token, bits });
+        app.vault.recovery = { code, createdAt: new Date().toISOString() };
+        await app.commit({ silent: true });
+        haptic('success');
+        fresh = true;
+        draw();
+        onDone?.();
+      } catch (ex) {
+        haptic('error');
+        err.textContent = ex.code === 'offline' ? 'This needs an internet connection.' : 'Couldn’t save the recovery key. Try again.';
+        btn.disabled = false; btn.textContent = label;
+      } finally { bits.fill(0); }
+    });
+  };
+  draw();
 }

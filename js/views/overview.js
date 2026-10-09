@@ -21,10 +21,12 @@ export function renderOverview(page) {
     return;
   }
 
+  const bad = m.statements.filter((s) => s.reconciled === false).length;
+  const unchecked = m.statements.filter((s) => s.reconciled == null).length;
   const body = `
     ${banners()}
     <section class="hero" aria-label="Balance">
-      <div class="eyebrow">${esc(m.vault.account?.bank || 'CIBC')} ${esc(m.vault.account?.name || 'Chequing')}</div>
+      <div class="eyebrow">${bal.relative ? 'Net since you started' : esc([m.vault.account?.bank, m.vault.account?.name].filter(Boolean).join(' ') || 'Balance')}</div>
       <div class="big" id="ov-bal">${money(fromCents(bal.cents))}</div>
       <div class="change" id="ov-change"></div>
       <div class="chart-wrap" id="ov-chart"></div>
@@ -37,18 +39,18 @@ export function renderOverview(page) {
     <div class="list-head"><span>Statements</span></div>
     <div class="list">
       <button class="row with-icon tap" data-act="statements">
-        <span class="cat-icon sm" style="--c:var(--${m.statements.every((s) => s.reconciled) ? 'green' : 'orange'})">${icon(m.statements.every((s) => s.reconciled) ? 'seal' : 'warn')}</span>
+        <span class="cat-icon sm" style="--c:var(--${bad ? 'orange' : 'green'})">${icon(bad ? 'warn' : 'seal')}</span>
         <span class="main"><span class="title">${plural(m.statements.length, 'statement')}</span>
-        <span class="subtitle">${m.statements.every((s) => s.reconciled) ? 'All reconciled to the bank’s balances' : `${m.statements.filter((s) => !s.reconciled).length} need attention`}</span></span>
+        <span class="subtitle">${bad ? `${bad} need attention` : unchecked === m.statements.length ? 'No balances in these files to check against' : unchecked ? `Reconciled · ${unchecked} without balances to check` : 'All reconciled to the bank’s balances'}</span></span>
         ${icon('chev-r', 'chev')}
       </button>
       <button class="row with-icon tap" data-act="add">
         <span class="cat-icon sm" style="--c:var(--blue)">${icon('doc')}</span>
-        <span class="main"><span class="title">Add Statement</span><span class="subtitle">Read a CIBC PDF on this device</span></span>
+        <span class="main"><span class="title">Add Statement</span><span class="subtitle">PDF, CSV or OFX from any bank</span></span>
         ${icon('chev-r', 'chev')}
       </button>
     </div>
-    <p class="list-foot">Balance as of ${dateLabel(bal.date, 'long')}. Data is decrypted only on this device.</p>`;
+    <p class="list-foot">${bal.relative ? `Your files don’t include a balance, so this shows money in minus money out since ${dateLabel(daily[0].date, 'long')}.` : `Balance as of ${dateLabel(bal.date, 'long')}.`} Data is decrypted only on this device.</p>`;
 
   page.innerHTML = pageFrame({ title: 'Overview', right, body });
   wire(page);
@@ -122,7 +124,7 @@ function banners() {
       ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('arrows')}</span><span class="txt"><b>Not synced yet</b><span>Saved on this device. Syncs automatically when you’re online.</span></span><button class="btn small" data-act="save">Sync</button></div>`
       : `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('upload')}</span><span class="txt"><b>Changes not in your repo yet</b><span>Saved on this device. Save to GitHub to sync.</span></span><button class="btn small" data-act="save">Save</button></div>`;
   }
-  const bad = app.model.statements.filter((s) => !s.reconciled);
+  const bad = app.model.statements.filter((s) => s.reconciled === false);
   if (bad.length) {
     out += `<button class="banner" style="--c:var(--red);width:100%;text-align:left" data-act="statements"><span class="ic">${icon('warn')}</span><span class="txt"><b>${bad.length === 1 ? `${monthLabel(bad[0].id)} doesn’t reconcile` : `${bad.length} statements don’t reconcile`}</b><span>Tap to see what’s off.</span></span>${icon('chev-r', 'chev')}</button>`;
   }
@@ -133,7 +135,7 @@ function emptyState() {
   return `<div class="card"><div class="empty">
     <div class="ic">${icon('doc')}</div>
     <h3>Add your first statement</h3>
-    <p>Choose your CIBC PDF statements. They’re read on this device, checked against the bank’s balances, then encrypted.</p>
+    <p>PDF statements from any bank, or CSV, OFX or QIF downloads from online banking. They’re read on this device, checked against the bank’s balances, then encrypted.</p>
     <button class="btn" data-act="add" style="max-width:280px">Add Statements</button>
   </div></div>`;
 }

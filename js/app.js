@@ -1,5 +1,5 @@
 // Money — app shell: lock screen, unlock/setup, auto-lock, persistence, tabs.
-import { esc } from './format.js';
+import { esc, setCurrency } from './format.js';
 import * as crypto from './crypto.js';
 import * as store from './store.js';
 import * as bio from './biometric.js';
@@ -12,6 +12,7 @@ import { renderOverview } from './views/overview.js';
 import { renderSpending } from './views/spending.js';
 import { renderActivity } from './views/activity.js';
 import { renderPlan } from './views/plan.js';
+import { recoveryCardHTML, wireRecoveryCard } from './views/recovery.js';
 
 const VIEWS = { overview: renderOverview, spending: renderSpending, activity: renderActivity, plan: renderPlan };
 const lockEl = document.getElementById('lock');
@@ -135,7 +136,7 @@ function showAccountLock(message = '') {
       <button class="btn ${useBio ? 'secondary' : ''}" type="submit" id="unlock-btn">${useBio ? 'Use Passphrase' : 'Unlock'}</button>
       <div class="err" id="lock-err" role="alert">${esc(message)}</div>
     </form>
-    <div class="lock-links"><button type="button" data-act="accounts">${store.accounts().length > 1 ? 'Switch account' : 'Use another account'}</button></div>`;
+    <div class="lock-links">${app.cloudOK ? '<button type="button" data-act="forgot">Forgot passphrase?</button>' : ''}<button type="button" data-act="accounts">${store.accounts().length > 1 ? 'Switch account' : 'Use another account'}</button></div>`;
   wireUnlock({
     useBio,
     unlockBio: async () => {
@@ -253,6 +254,9 @@ function cloudMessage(e) {
     too_many_attempts: 'Too many tries. Wait 15 minutes, then try again.',
     offline: 'You’re offline. Connect to the internet and try again.',
     not_configured: 'Accounts aren’t set up on this site yet.',
+    wrong_recovery_key: 'That recovery key doesn’t match this account.',
+    bad_recovery_key: 'A recovery key is 24 letters and numbers, like K7QM-2D9X-….',
+    conflict: 'Something changed on another device. Try again.',
   }[e?.code] || (e?.status ? `Something went wrong (${e.status}). Try again.` : '');
 }
 
@@ -265,6 +269,7 @@ function handleLink(e) {
   if (a === 'file') pickVaultFile();
   if (a === 'signin') showSignIn();
   if (a === 'create') showCreateAccount();
+  if (a === 'forgot') showForgot(document.getElementById('si-user')?.value || app.account || '');
   if (a === 'accounts') store.accounts().length ? showAccounts() : showWelcome();
   if (a === 'legacy') { useLegacy(); showLock(); }
   if (a === 'back') showLock();
@@ -283,7 +288,7 @@ function showSignIn() {
       <button class="btn" type="submit" id="si-btn">Sign In</button>
       <div class="err" id="lock-err" role="alert"></div>
     </form>
-    <div class="lock-links"><button type="button" data-act="create">Create an account instead</button><button type="button" data-act="back">Back</button></div>`;
+    <div class="lock-links"><button type="button" data-act="forgot">Forgot passphrase?</button><button type="button" data-act="create">Create an account instead</button><button type="button" data-act="back">Back</button></div>`;
   setTimeout(() => document.getElementById('si-user').focus(), 250);
   document.getElementById('signin-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -368,7 +373,7 @@ function showCreateAccount() {
       store.setSynced(r.username, r.env.rev);
       app.account = r.username;
       app.env = r.env;
-      enter({ session: r.session, vault, demo: false, firstRun: true });
+      showRecoveryKey(r.username, r.recoveryKey, () => enter({ session: r.session, vault, demo: false, firstRun: true }));
     } catch (ex) {
       haptic('error');
       err.textContent = cloudMessage(ex) || 'Couldn’t create the account. Try again.';
@@ -379,6 +384,127 @@ function showCreateAccount() {
 }
 
 /** A vault kept only on this device (or committed to the repo), no account. */
+/** Right after sign-up: the one chance to save the recovery key before going in. */
+function showRecoveryKey(username, code, onDone) {
+  lockEl.querySelector('.app-icon').hidden = false;
+  lockLead.innerHTML = '<b>Save your recovery key</b><br>If you ever forget your passphrase, this key lets you set a new one. Keep it somewhere safe, like your password manager.';
+  lockBody.innerHTML = `${recoveryCardHTML(code)}
+    <div class="btn-row" style="margin-top:14px"><button class="btn" type="button" id="rk-done">I’ve Saved It</button></div>
+    <p class="hint" style="text-align:center;margin-top:10px">Anyone with this key and your username could reset your passphrase, so keep it private. You can see it again in Settings.</p>`;
+  let saved = false;
+  let warned = false;
+  wireRecoveryCard(lockBody, code, username, () => { saved = true; });
+  document.getElementById('rk-done').addEventListener('click', (e) => {
+    // Not copied, saved or shared yet: say so once, right here (alerts sit under the lock screen).
+    if (!saved && !warned) {
+      warned = true;
+      haptic('error');
+      e.currentTarget.textContent = 'Continue Without Saving';
+      e.currentTarget.classList.add('secondary');
+      const hint = lockBody.querySelector('.hint');
+      hint.style.color = 'var(--negative)';
+      hint.textContent = 'You haven’t copied or saved it yet. It’s the only way back in if you forget your passphrase. You can also find it later in Settings → Recovery Key.';
+      return;
+    }
+    haptic();
+    onDone();
+  });
+}
+
+/** Forgot passphrase: Face ID on a device that has it, or the recovery key. */
+function showForgot(prefill = '') {
+  const u0 = cloud.normUser(prefill);
+  const env = u0 ? store.loadAccountEnv(u0) : null;
+  const canBio = !!env && app.bioSupported && bio.isEnrolledFor(env, u0);
+  const name = bio.label();
+  lockEl.querySelector('.app-icon').hidden = false;
+  lockLead.textContent = canBio ? `Set a new passphrase with ${name} or your recovery key.` : 'Set a new passphrase with your recovery key.';
+  lockBody.innerHTML = `
+    ${canBio ? `<div class="btn-row" style="margin:0 0 18px"><button class="btn" type="button" id="fg-bio">${icon(name === 'Face ID' ? 'faceid' : 'touchid')} Reset with ${esc(name)}</button></div>` : ''}
+    <form class="lock-form" id="fg-form" autocomplete="off">
+      <input class="field" id="fg-user" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Username" aria-label="Username" value="${esc(u0)}" required>
+      <input class="field mono" id="fg-key" type="text" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="Recovery key" aria-label="Recovery key" required>
+      <button class="btn ${canBio ? 'secondary' : ''}" type="submit" id="fg-btn">Continue</button>
+      <div class="err" id="lock-err" role="alert"></div>
+    </form>
+    <p class="hint" style="text-align:center;margin-top:10px">Your recovery key was shown when you created your account, and it’s in Settings on any device you’re signed in to. Without it, nobody can get your data back, not even whoever runs the site. That’s what keeps it private.</p>
+    <div class="lock-links"><button type="button" data-act="back">Back</button></div>`;
+  const err = document.getElementById('lock-err');
+  setTimeout(() => document.getElementById(u0 ? 'fg-key' : 'fg-user').focus(), 250);
+  document.getElementById('fg-bio')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true; err.textContent = '';
+    let bits;
+    try {
+      bits = await bio.unlockBits(env, u0);
+      showNewPassphrase(await cloud.openWithBits(u0, bits));
+    } catch (ex) {
+      b.disabled = false;
+      if (ex?.name === 'NotAllowedError' || ex?.name === 'AbortError') return;
+      haptic('error');
+      if (ex?.message === 'WRAP_INVALID') bio.disable(u0);
+      err.textContent = ex?.code === 'wrong_recovery_key' || ex?.message === 'WRAP_INVALID' || ex?.message === 'WRONG_PASSPHRASE'
+        ? `${name} on this device is from an older passphrase. Use your recovery key.` : cloudMessage(ex) || `${name} didn’t work this time.`;
+    } finally { bits?.fill(0); }
+  });
+  document.getElementById('fg-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('fg-btn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+    err.textContent = '';
+    try {
+      const r = await cloud.recoverWithKey(document.getElementById('fg-user').value, document.getElementById('fg-key').value);
+      document.getElementById('fg-key').value = '';
+      showNewPassphrase(r);
+    } catch (ex) {
+      haptic('error');
+      err.textContent = cloudMessage(ex) || 'Couldn’t check the recovery key. Try again.';
+      btn.disabled = false; btn.textContent = 'Continue';
+    }
+  });
+  wireLockLinks();
+}
+
+/** Choose a new passphrase for an account opened with the recovery key or Face ID. */
+function showNewPassphrase(r) {
+  lockEl.querySelector('.app-icon').hidden = true;
+  lockLead.innerHTML = `<span class="lock-avatar">${avatar(r.username, 76)}</span><b class="lock-user">@${esc(r.username)}</b><br>Choose a new passphrase.`;
+  lockBody.innerHTML = `
+    <form class="lock-form" id="np-form" autocomplete="on">
+      <input type="text" name="username" value="${esc(r.username)}" autocomplete="username" hidden>
+      ${passphraseFields()}
+      <button class="btn" type="submit" id="np-btn">Set New Passphrase</button>
+      <div class="err" id="lock-err" role="alert"></div>
+    </form>
+    <p class="hint" style="text-align:center;margin-top:10px">Your other devices will ask for the new passphrase. Your recovery key keeps working.</p>`;
+  wireMeter();
+  setTimeout(() => document.getElementById('p1').focus(), 250);
+  document.getElementById('np-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('lock-err');
+    const pass = checkNewPassphrase(err);
+    if (!pass) return;
+    const btn = document.getElementById('np-btn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+    try {
+      const res = await cloud.setPassphrase({ username: r.username, oldToken: r.token, vault: r.vault, env: r.env, baseRev: r.env.rev, passphrase: pass });
+      document.getElementById('p1').value = ''; document.getElementById('p2').value = '';
+      bio.disable(r.username); // it held the old key
+      store.rememberAccount(r.username);
+      store.saveAccountEnv(r.username, res.env);
+      store.setSynced(r.username, res.env.rev);
+      app.account = r.username;
+      app.env = res.env;
+      enter({ session: res.session, vault: res.vault, demo: false });
+      setTimeout(() => toast(res.vault.recovery?.code ? 'New passphrase set on all your devices' : 'New passphrase set. Turn on a recovery key in Settings.', { icon: 'key', color: 'blue' }), 500);
+    } catch (ex) {
+      haptic('error');
+      err.textContent = cloudMessage(ex) || 'Couldn’t set the passphrase. Try again.';
+      btn.disabled = false; btn.textContent = 'Set New Passphrase';
+    }
+  });
+}
+
 function showSetup() {
   lockEl.querySelector('.app-icon').hidden = false;
   lockLead.textContent = 'Choose a passphrase. It encrypts everything, and it can’t be recovered — so write it down somewhere safe.';
@@ -456,7 +582,10 @@ function enter({ session, vault, demo, firstRun = false }) {
   if (app.account && !demo) pullLatest();
 }
 
-export function rebuild() { app.model = buildModel(app.vault, app.rules); }
+export function rebuild() {
+  setCurrency(app.vault.account?.currency);
+  app.model = buildModel(app.vault, app.rules);
+}
 
 /** Persist a change: re-encrypt, store the working copy, sync, re-render. */
 app.commit = async function commit({ silent = false } = {}) {

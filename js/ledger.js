@@ -9,7 +9,7 @@ export const SCHEMA = 1;
 export function emptyVault() {
   return {
     schema: SCHEMA,
-    account: { bank: 'CIBC', name: 'Chequing', currency: 'CAD' },
+    account: { bank: null, name: null, currency: 'CAD' },
     statements: [],
     transactions: [],
     userRules: [],
@@ -65,6 +65,7 @@ export function prepareImport(vault, parsed, compiled) {
     transactions: txns,
     parsedCount: parsed.transactions.length,
     duplicates,
+    meta: parsed.meta || { parser: 'cibc', format: 'pdf' },
     alreadyImported: !!existing,
   };
 }
@@ -72,6 +73,12 @@ export function prepareImport(vault, parsed, compiled) {
 /** Commit a prepared import into the vault (mutates and returns it). */
 export function commitImport(vault, prep) {
   if (!prep.id) throw new Error('Statement period unknown');
+  // The first statement in a new vault sets the account's currency and kind.
+  if (!vault.statements.length && vault.account) {
+    if (prep.meta?.currency) vault.account.currency = prep.meta.currency;
+    if (prep.meta?.bank) vault.account.bank = prep.meta.bank;
+    if (prep.meta?.card) vault.account.name = 'Credit Card';
+  }
   // Replacing a statement keeps manual edits (category, one-off) on the same transactions.
   const old = new Map();
   for (const t of vault.transactions) if (t.statement === prep.id && (t.locked || t.oneOff)) old.set(dupKey(t), t);
@@ -92,7 +99,8 @@ export function commitImport(vault, prep) {
     withdrawals: prep.reconciliation.totals.withdrawals,
     deposits: prep.reconciliation.totals.deposits,
     count: prep.transactions.length,
-    reconciled: prep.reconciliation.ok,
+    reconciled: prep.reconciliation.ok, // true, false, or null when the file had no balances to check
+    source: prep.meta?.parser === 'cibc' ? 'cibc' : prep.meta?.format || 'pdf',
     checks: prep.reconciliation.checks,
     issues: prep.reconciliation.issues,
     importedAt: new Date().toISOString(),
@@ -206,11 +214,13 @@ export function dailyBalance(model) {
   const byDate = new Map();
   for (const t of model.txns) byDate.set(t.date, (byDate.get(t.date) || 0) + t.c);
   let bal = null;
+  // Files without any balance (some CSV exports) still get a line: the running net from zero.
+  out.relative = !model.statements.some((s) => s.opening != null);
   for (const st of model.statements) {
-    if (st.opening == null) continue;
+    if (st.opening == null && !out.relative && !out.length) continue;
     let day = st.start;
     if (out.length && out[out.length - 1].date >= day) day = addDays(out[out.length - 1].date, 1);
-    bal = toCents(st.opening);
+    bal = st.opening != null ? toCents(st.opening) : out.length ? out[out.length - 1].bal : 0;
     // CIBC's opening balance is as of the first day, before that day's transactions.
     const txIn = (d) => byDate.get(d) || 0;
     if (out.length && daysBetween(out[out.length - 1].date, st.start) > 1) {
@@ -228,8 +238,9 @@ export function dailyBalance(model) {
 }
 
 export function currentBalance(model) {
-  const last = model.statements[model.statements.length - 1];
-  return last ? { cents: toCents(last.closing), date: last.end } : null;
+  const d = dailyBalance(model);
+  if (!d.length) return null;
+  return { cents: d[d.length - 1].bal, date: d[d.length - 1].date, relative: d.relative };
 }
 
 // ---------------------------------------------------------------------------

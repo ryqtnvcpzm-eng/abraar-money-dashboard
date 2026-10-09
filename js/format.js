@@ -1,8 +1,16 @@
 // Formatting + small pure helpers shared by the app and the Node tools.
 
 const LOCALE = 'en-CA';
-const money2 = new Intl.NumberFormat(LOCALE, { style: 'currency', currency: 'CAD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const money0 = new Intl.NumberFormat(LOCALE, { style: 'currency', currency: 'CAD', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+let money2, money0, symbol;
+/** Show money in the account's currency (ISO code). Defaults to Canadian dollars. */
+export function setCurrency(code = 'CAD') {
+  let c = String(code || 'CAD').toUpperCase();
+  try { new Intl.NumberFormat(LOCALE, { style: 'currency', currency: c }); } catch { c = 'CAD'; }
+  money2 = new Intl.NumberFormat(LOCALE, { style: 'currency', currency: c, minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  money0 = new Intl.NumberFormat(LOCALE, { style: 'currency', currency: c, minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  symbol = money0.formatToParts(0).find((p) => p.type === 'currency')?.value || '$';
+}
+setCurrency('CAD');
 
 export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -25,8 +33,8 @@ export function money(n, { sign = false, cents = true } = {}) {
 export function moneyShort(n) {
   const v = Math.abs(n);
   const sgn = n < 0 ? '−' : '';
-  if (v >= 1000) return sgn + '$' + (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
-  return sgn + '$' + Math.round(v);
+  if (v >= 1000) return sgn + symbol + (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+  return sgn + symbol + Math.round(v);
 }
 
 export const pct = (n, d = 0) => (Number.isFinite(n) ? (n * 100).toFixed(d) : '0') + '%';

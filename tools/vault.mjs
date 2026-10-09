@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 // Command-line companion to the app. Everything runs locally; nothing is uploaded.
 //
-//   node tools/vault.mjs check  statements/*.pdf   Parse + reconcile PDFs and print the table. Writes nothing.
-//   node tools/vault.mjs import statements/*.pdf   Same, then add them to data/vault.enc.json (asks for the passphrase).
+//   node tools/vault.mjs check  statements/*        Parse + reconcile statement files (PDF, CSV, OFX, QIF) and print the table. Writes nothing.
+//   node tools/vault.mjs import statements/*        Same, then add them to data/vault.enc.json (asks for the passphrase).
 //   node tools/vault.mjs report                     Decrypt data/vault.enc.json and print statements + category totals.
 //
 // Needs `npm install` once (for pdfjs-dist).
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import readline from 'node:readline';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { pdfToPages } from '../js/pdf-text.js';
-import { parseCibcStatement } from '../js/cibc-parser.js';
+import { readStatementFile } from '../js/statements.js';
 import { compileRules } from '../js/categorize.js';
 import { emptyVault, prepareImport, commitImport, buildModel, spendByCategory, flow } from '../js/ledger.js';
 import * as crypto from '../js/crypto.js';
@@ -35,11 +34,12 @@ async function parseAll(vault) {
   const work = structuredClone(vault);
   for (const f of files) {
     try {
-      const parsed = parseCibcStatement(await pdfToPages(pdfjs, new Uint8Array(readFileSync(f))));
-      if (!parsed.period) throw new Error('no statement period found');
-      const prep = prepareImport(work, parsed, compiled);
-      commitImport(work, prep);
-      preps.push({ file: f, parsed, prep });
+      const { statements } = await readStatementFile({ name: f, bytes: new Uint8Array(readFileSync(f)) }, { pdfjs });
+      for (const parsed of statements) {
+        const prep = prepareImport(work, parsed, compiled);
+        commitImport(work, prep);
+        preps.push({ file: f, parsed, prep });
+      }
     } catch (e) {
       preps.push({ file: f, error: e.message });
     }
@@ -56,7 +56,7 @@ function table(preps) {
     const comp = r.checks.find((c) => c.label === 'Closing balance')?.computed;
     console.log([
       pad(p.prep.id, 9, false), pad(f2(p.prep.opening), 12), pad(f2(p.prep.summaryTotals.deposits), 12), pad(f2(p.prep.summaryTotals.withdrawals), 12),
-      pad(f2(p.prep.closing), 12), pad(f2(comp), 15), pad(p.prep.transactions.length, 5), pad(p.prep.duplicates, 6), r.ok ? '✓ reconciled' : '✗ MISMATCH',
+      pad(f2(p.prep.closing), 12), pad(f2(comp), 15), pad(p.prep.transactions.length, 5), pad(p.prep.duplicates, 6), r.ok ? '✓ reconciled' : r.ok === null ? '· not checked' : '✗ MISMATCH',
     ].join('  '));
     for (const i of r.issues) console.log('           ↳ ' + i);
   }

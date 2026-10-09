@@ -37,7 +37,7 @@ export function renderActivity(page) {
     if (!entries.length) {
       listEl.innerHTML = app.model.txns.length
         ? `<div class="empty"><div class="ic">${icon('search')}</div><h3>No Results</h3><p>Nothing matches “${esc(app.ui.search)}”.</p></div>`
-        : `<div class="card"><div class="empty"><div class="ic">${icon('activity')}</div><h3>No transactions yet</h3><p>Add a CIBC statement to fill this in.</p><button class="btn" data-act="add" style="max-width:260px">Add Statement</button></div></div>`;
+        : `<div class="card"><div class="empty"><div class="ic">${icon('activity')}</div><h3>No transactions yet</h3><p>Add a statement from your bank to fill this in.</p><button class="btn" data-act="add" style="max-width:260px">Add Statement</button></div></div>`;
       return;
     }
     let lastMonth = null;
