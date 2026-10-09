@@ -602,4 +602,4 @@ body.sheet-open #app .navbar::before { background: var(--bar-solid); }
 .split-del { flex: none; width: 30px; height: 30px; border: 0; border-radius: 15px; background: none; color: var(--label-3); display: grid; place-items: center; cursor: pointer; }
 .split-del .icon { width: 14px; height: 14px; }
 #split-rest { min-width: 104px; text-align: right; padding-right: 40px; }
-
+.amz-store { border: 0; background: none; color: var(--label-2); font: 400 17px/22px var(--font); text-align: right; max-width: 55%; cursor: pointer; }

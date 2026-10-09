@@ -5,6 +5,7 @@ import worker from '../worker/index.js';
 import * as cloud from '../js/cloud.js';
 import { emptyVault } from '../js/ledger.js';
 import { seal, openWithSession } from '../js/crypto.js';
+import { plaidMock } from './plaid-mock.mjs';
 
 // --- minimal D1 shim over node:sqlite ---
 function fakeD1() {
@@ -18,7 +19,16 @@ function fakeD1() {
   return { prepare: (sql) => new Stmt(sql), batch: async (list) => Promise.all(list.map((s) => s.run())) };
 }
 const env = { DB: fakeD1(), INVITE_CODE: 'family-2026' };
-globalThis.fetch = async (url, init = {}) => worker.fetch(new Request(new URL(url, 'https://money.test/'), init), env);
+// Plaid calls the Worker makes go to a stand-in; everything else goes to the Worker.
+const plaid = plaidMock();
+let liveEnv = env;
+globalThis.fetch = async (url, init = {}) => {
+  if (String(url).startsWith(plaid.base)) {
+    const r = plaid.handle(new URL(String(url)).pathname, JSON.parse(init.body));
+    return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'Content-Type': 'application/json' } });
+  }
+  return worker.fetch(new Request(new URL(url, 'https://money.test/'), init), liveEnv);
+};
 
 let passed = 0; const failed = [];
 async function test(name, fn) { try { await fn(); passed++; console.log('  ✓', name); } catch (e) { failed.push(name); console.log('  ✗', name, '\n    ', e.message); } }
@@ -201,6 +211,75 @@ await test('deleting an account removes it', async () => {
   const s = await cloud.signIn('sis', 'another passphrase entirely');
   await cloud.deleteAccount('sis', s.token);
   assert.equal(await env.DB.prepare('SELECT * FROM recovery WHERE username = ?').bind('sis').first(), null);
+});
+
+console.log('Bank sync (through a stand-in for Plaid)');
+let C;
+await test('off until the Plaid keys are set', async () => {
+  C = await cloud.createAccount({ invite: 'family-2026', username: 'banker', passphrase: 'green kettle sunny window', vault: emptyVault() });
+  assert.equal((await cloud.serverStatus()).bank, false);
+  await rejects(cloud.bank('banker', C.token, 'link'), 'bank_not_configured');
+  liveEnv = { ...env, PLAID_CLIENT_ID: 'test-client', PLAID_SECRET: 'test-secret', PLAID_ENV: 'sandbox' };
+  assert.equal((await cloud.serverStatus()).bank, true);
+});
+await test('every bank call needs the account’s token', async () => {
+  await rejects(cloud.bank('banker', 'not-the-token', 'link'), 'unauthorized');
+  await rejects(cloud.bank('abraar', C.token, 'link'), 'unauthorized');
+});
+let link, access;
+await test('connect: Plaid’s hosted page, then the access token comes back to the browser only', async () => {
+  link = await cloud.bank('banker', C.token, 'link');
+  assert.match(link.url, /\/hosted\/link-sandbox-/);
+  const s = plaid.sessions.get(link.linkToken);
+  assert.equal(s.redirect, 'https://money.test/bank-done.html');
+  assert.deepEqual(s.products, ['transactions']);
+  assert.notEqual(s.user.client_user_id, 'banker', 'Plaid never sees the username');
+  assert.equal((await cloud.bank('banker', C.token, 'finish', { linkToken: link.linkToken })).status, 'pending');
+  plaid.complete(link.linkToken);
+  const r = await cloud.bank('banker', C.token, 'finish', { linkToken: link.linkToken });
+  assert.equal(r.status, 'done');
+  assert.match(r.accessToken, /^access-sandbox-/);
+  assert.equal(r.institution, 'Sample Bank');
+  assert.deepEqual(r.accounts.map((a) => a.id), ['acc-chq', 'acc-card', 'acc-loan']);
+  assert.ok(!JSON.stringify(r).includes('mask') && !JSON.stringify(r).includes('0000'), 'no account numbers');
+  access = r.accessToken;
+  // Nothing about the bank is stored on the server.
+  const rows = JSON.stringify([await env.DB.prepare('SELECT * FROM accounts WHERE username = ?').bind('banker').first()]);
+  assert.ok(!rows.includes(access) && !rows.includes('Sample Bank'));
+});
+await test('leaving Plaid’s page without finishing', async () => {
+  const l = await cloud.bank('banker', C.token, 'link');
+  plaid.complete(l.linkToken, { exit: true });
+  assert.equal((await cloud.bank('banker', C.token, 'finish', { linkToken: l.linkToken })).status, 'exited');
+});
+await test('sync: every page, one account, trimmed to what Money needs', async () => {
+  for (let i = 0; i < 620; i++) plaid.state.txns.push(plaid.txn(`t${i}`, `2026-10-${String(1 + (i % 9)).padStart(2, '0')}`, 4.5, 'Coffee Spot', { pfc: 'FOOD_AND_DRINK_COFFEE' }));
+  plaid.state.txns.push(plaid.txn('card1', '2026-10-03', 30, 'Card thing', { account: 'acc-card' }));
+  plaid.state.mutateOnce = true; // the bank updates mid-way: start again from the same cursor
+  const r = await cloud.bank('banker', C.token, 'sync', { accessToken: access, cursor: '', accountId: 'acc-chq' });
+  assert.equal(r.added.length, 620);
+  assert.equal(r.cursor, 'c621');
+  assert.deepEqual(Object.keys(r.added[0]).sort(), ['account', 'amount', 'currency', 'date', 'id', 'merchant', 'name', 'original', 'pending', 'pfc']);
+  assert.equal(r.added[0].pfc, 'FOOD_AND_DRINK_COFFEE');
+  assert.equal(r.accounts.find((a) => a.id === 'acc-chq').current, 1500.25);
+  const again = await cloud.bank('banker', C.token, 'sync', { accessToken: access, cursor: r.cursor, accountId: 'acc-chq' });
+  assert.equal(again.added.length, 0);
+});
+await test('bank errors come back with Plaid’s code', async () => {
+  plaid.state.loginRequired = true;
+  try { await cloud.bank('banker', C.token, 'sync', { accessToken: access, cursor: 'c621' }); assert.fail('should throw'); } catch (e) { assert.equal(e.code, 'bank_error'); assert.equal(e.plaid, 'ITEM_LOGIN_REQUIRED'); }
+  plaid.state.loginRequired = false;
+  // Reconnecting ("update mode") uses the same access token.
+  const l = await cloud.bank('banker', C.token, 'link', { accessToken: access });
+  assert.equal(plaid.sessions.get(l.linkToken).update, true);
+  plaid.complete(l.linkToken);
+  assert.equal((await cloud.bank('banker', C.token, 'finish', { linkToken: l.linkToken, update: true })).status, 'done');
+  await rejects(cloud.bank('banker', C.token, 'sync', { accessToken: 'not a token' }), 'bad_request');
+});
+await test('disconnect removes the connection at Plaid', async () => {
+  await cloud.bank('banker', C.token, 'remove', { accessToken: access });
+  try { await cloud.bank('banker', C.token, 'sync', { accessToken: access, cursor: '' }); assert.fail('should throw'); } catch (e) { assert.equal(e.plaid, 'INVALID_ACCESS_TOKEN'); }
+  liveEnv = env;
 });
 
 console.log(`\n${passed} passed, ${failed.length} failed`);

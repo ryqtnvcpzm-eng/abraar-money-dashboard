@@ -194,7 +194,7 @@ export function buildModel(vault, compiled) {
   const sig = `${home}|${(vault.userRules || []).map((r) => `${r.name}\u0001${r.category}\u0001${r.sign}`).join('\u0002')}`;
   if (compiled.memoSig !== sig || !compiled.memo || compiled.memo.size > 50_000) { compiled.memo = new Map(); compiled.memoSig = sig; }
   const decide = (t) => {
-    const key = `${Math.sign(t.amount) || -1}|${t.merchant}`;
+    const key = `${Math.sign(t.amount) || -1}|${t.merchant}|${t.hint || ''}`;
     let r = compiled.memo.get(key);
     if (!r) { r = categorize({ ...t, locked: false }, compiled, vault.userRules, home); compiled.memo.set(key, r); }
     return r;

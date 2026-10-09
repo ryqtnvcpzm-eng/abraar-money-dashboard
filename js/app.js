@@ -582,7 +582,7 @@ function enter({ session, vault, demo, firstRun = false }) {
   startAutoLock();
   haptic();
   if (firstRun) setTimeout(() => import('./views/importer.js').then((m) => m.openImporter({ welcome: true })), 600);
-  if (app.account && !demo) pullLatest().then(offerUnsynced);
+  if (app.account && !demo) pullLatest().then(offerUnsynced).then(() => (app.vault?.bank && !app.demo ? import('./views/bank.js').then((m) => m.maybeAutoSync()) : null));
 }
 
 export function rebuild() {

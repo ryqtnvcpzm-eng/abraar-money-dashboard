@@ -48,6 +48,7 @@ export function openSettings() {
       <div class="list">
         ${row('plus', 'blue', 'Add Statement', { act: 'add' })}
         ${row('doc', 'indigo', 'Statements', { detail: String(app.model.statements.length), act: 'statements' })}
+        ${row('arrows', 'blue', 'Bank Sync', { sub: v.bank?.accessToken ? `${v.bank.institution || 'Connected'}${v.bank.problem ? ' · needs you to sign in again' : ''}` : 'Pull new transactions from your bank', act: 'bank' })}
         ${row('box', 'orange', 'Amazon Orders', { sub: 'Sort Amazon charges by what you bought', act: 'amazon' })}
         ${row('tag', 'orange', 'Merchant Rules', { detail: String((v.userRules || []).length), act: 'rules' })}
       </div>
@@ -108,6 +109,7 @@ export function openSettings() {
     if (act === 'statements') openStatements();
     if (act === 'rules') openRules(draw);
     if (act === 'amazon') (await import('./amazon-import.js')).openAmazonImport();
+    if (act === 'bank') (await import('./bank.js')).openBank({ onDone: draw });
     if (act === 'autolock') pickAutoLock(draw);
     if (act === 'passphrase') changePassphrase();
     if (act === 'lock') { sheet.close(); app.lock(); }

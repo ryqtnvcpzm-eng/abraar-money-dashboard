@@ -233,3 +233,13 @@ export async function push(username, token, env, baseRev, { force = false, newTo
 export async function deleteAccount(username, token) {
   return call('DELETE', `accounts/${encodeURIComponent(username)}`, { token });
 }
+
+/** What the server offers: { configured, bank }. Never throws. */
+export async function serverStatus() {
+  try { return await call('GET', 'status'); } catch { return { configured: false, bank: false }; }
+}
+
+/** Bank sync through the Worker (it adds the Plaid secret and keeps nothing). action: link | finish | sync | remove */
+export function bank(username, token, action, body = {}) {
+  return call('POST', `accounts/${encodeURIComponent(username)}/bank/${action}`, { token, body });
+}

@@ -88,6 +88,13 @@ export function openImporter({ welcome = false } = {}) {
         ${icon('plus')} ${files.length ? 'Choose More Files' : 'Choose Files'}
         <input type="file" accept="${ACCEPT}" multiple hidden id="imp-file">
       </label>
+      ${!files.length ? `<div class="list-head"><span>Other ways to add</span></div>
+      <div class="list">
+        <button class="row with-icon tap" data-act="bank"><span class="cat-icon sm" style="--c:var(--blue)">${icon('arrows')}</span>
+          <span class="main"><span class="title">${app.vault.bank?.accessToken ? 'Sync From Your Bank' : 'Connect Your Bank'}</span><span class="subtitle">${app.vault.bank?.accessToken ? `${esc(app.vault.bank.institution || 'Connected')} · new transactions come in on their own` : 'New transactions come in on their own'}</span></span>${icon('chev-r', 'chev')}</button>
+        <button class="row with-icon tap" data-act="amazon"><span class="cat-icon sm" style="--c:var(--orange)">${icon('box')}</span>
+          <span class="main"><span class="title">Amazon Orders</span><span class="subtitle">See what each Amazon charge bought</span></span>${icon('chev-r', 'chev')}</button>
+      </div>` : ''}
       ${pendingOrErr.map(fileCard).join('')}
       <div id="imp-items">${all.map(card).join('')}</div>
       ${all.length ? `<div class="btn-row" style="position:sticky;bottom:0;padding:12px 0 4px;background:linear-gradient(transparent,var(--sheet-bg) 30%)">
@@ -253,6 +260,8 @@ export function openImporter({ welcome = false } = {}) {
       draw();
       toast(`Added ${plural(chosen.length, 'statement')}`);
     }
+    if (act === 'bank') { haptic(); (await import('./bank.js')).openBank(); return; }
+    if (act === 'amazon') { haptic(); (await import('./amazon-import.js')).openAmazonImport(); return; }
     if (act === 'teach') { (await import('./teach.js')).openTeach({ onDone: () => { done.unknown = 0; draw(); } }); }
     if (act === 'push') { const s = await import('./settings.js'); await s.saveToRepo(); sheet.close(); }
     if (act === 'export') { const s = await import('./settings.js'); await s.exportVault(); }

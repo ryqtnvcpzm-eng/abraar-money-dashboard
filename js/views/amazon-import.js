@@ -4,10 +4,19 @@ import { app } from '../state.js';
 import { money, esc, plural } from '../format.js';
 import { icon, catIcon, openSheet, haptic } from '../ui.js';
 
+// Amazon has no API for your own orders, so this is the one official way to get them: its
+// data-request page. Opened directly on the store for the account's currency.
+const STORES = [
+  ['amazon.ca', 'Amazon.ca', 'CAD'], ['amazon.com', 'Amazon.com', 'USD'], ['amazon.co.uk', 'Amazon.co.uk', 'GBP'], ['amazon.de', 'Amazon.de', 'EUR'],
+  ['amazon.fr', 'Amazon.fr', ''], ['amazon.es', 'Amazon.es', ''], ['amazon.it', 'Amazon.it', ''], ['amazon.in', 'Amazon.in', 'INR'],
+  ['amazon.com.au', 'Amazon.com.au', 'AUD'], ['amazon.co.jp', 'Amazon.co.jp', 'JPY'], ['amazon.com.mx', 'Amazon.com.mx', 'MXN'], ['amazon.ae', 'Amazon.ae', 'AED'],
+];
+const requestUrl = (host) => `https://www.${host}/gp/privacycentral/dsar/preview.html`;
+let store = null;
 const STEPS = [
-  'On Amazon, go to <b>Account → Request Your Data</b> (on the app: Your Account → Login & security → Request your data).',
-  'Choose <b>Your Orders</b> and submit. Amazon emails a download link, usually within a day or two.',
-  'Download the zip and add it here. You can add the zip as it is, or the <b>Retail.OrderHistory</b> CSV inside it.',
+  'Tap <b>Open Amazon</b> below, sign in, choose <b>Your Orders</b> and submit the request. (Or on Amazon: Account → Request Your Data.)',
+  'Amazon emails you a download link, usually within a day or two.',
+  'Download the zip and add it here, as it is, or just the <b>Retail.OrderHistory</b> CSV inside it.',
 ];
 
 /** Import Amazon order files picked anywhere in the app (also called from Add Statements). */
@@ -50,15 +59,28 @@ export function openAmazonImport() {
         <p class="when" style="max-width:350px;margin:8px auto 0">Your bank only says “Amazon”. Your order history says it was a phone case, coffee or a lamp, so each charge goes to the right category, and an order with a bit of everything is split.</p>
       </div>
       <div class="list">${STEPS.map((s, i) => `<div class="row with-icon"><span class="cat-icon sm" style="--c:var(--orange)"><b style="font:600 13px/1 var(--font)">${i + 1}</b></span><span class="main"><span class="subtitle" style="white-space:normal;color:var(--label)">${s}</span></span></div>`).join('')}</div>
-      <label class="btn" style="margin-top:18px">
+      <div class="list" style="margin-top:14px">
+        <label class="row"><span class="main"><span class="title">Your Amazon store</span></span>
+          <select class="amz-store" id="amz-store" aria-label="Amazon store">${STORES.map(([h, n]) => `<option value="${h}" ${h === store ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div>
+      <a class="btn secondary" id="amz-open" href="${requestUrl(store)}" target="_blank" rel="noopener noreferrer" style="margin-top:12px">${icon('share')} Open Amazon</a>
+      <label class="btn" style="margin-top:10px">
         ${busy ? '<span class="spinner"></span> Reading…' : `${icon('plus')} Choose Amazon File`}
         <input type="file" accept=".zip,.csv,application/zip,text/csv" hidden id="amz-file" ${busy ? 'disabled' : ''}>
       </label>
       ${error ? `<p class="list-foot neg" style="text-align:center">${esc(error)}</p>` : ''}
       <p class="list-foot">Read on this device and never uploaded. Only item names, prices, dates and categories are kept, inside your encrypted vault. Addresses, order numbers and payment details are ignored.</p>`);
   };
+  try { store ||= localStorage.getItem('money.amazonStore'); } catch { /* private mode */ }
+  store ||= (STORES.find(([, , c]) => c && c === app.vault?.account?.currency) || STORES[0])[0];
   draw();
   sheet.el.addEventListener('change', async (e) => {
+    if (e.target.id === 'amz-store') {
+      store = e.target.value;
+      try { localStorage.setItem('money.amazonStore', store); } catch { /* private mode */ }
+      sheet.el.querySelector('#amz-open').href = requestUrl(store);
+      return;
+    }
     if (e.target.id !== 'amz-file' || !e.target.files?.length) return;
     busy = true; error = null; draw();
     try {
