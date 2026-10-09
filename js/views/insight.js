@@ -31,8 +31,9 @@ export function openInsight(card) {
       <p>${esc(card.text)}</p>
     </div>
     ${build(card, ctx)}`);
-  // Draw charts once the sheet has its width.
-  requestAnimationFrame(() => charts.forEach(([id, fn]) => { const el = sheet.el.querySelector(`#${id}`); if (el) fn(el); }));
+  // Draw charts now, before the sheet starts sliding in (it's already in the page, so it has its width);
+  // their own animations wait until it has settled.
+  charts.forEach(([id, fn]) => { const el = sheet.el.querySelector(`#${id}`); if (el) fn(el); });
   sheet.el.addEventListener('click', (e) => {
     const t = e.target.closest('[data-txn]');
     if (t) { haptic(); openTxn(t.dataset.txn); return; }

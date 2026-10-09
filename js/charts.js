@@ -1,7 +1,7 @@
 // Charts drawn as inline SVG: Stocks-style scrubbable balance chart, stacked monthly columns,
 // mini column chart, and Apple Watch-style activity rings.
 import { moneyShort, money, monthLabel, dateLabel, esc } from './format.js';
-import { haptic, reducedMotion } from './ui.js';
+import { haptic, reducedMotion, whenSettled } from './ui.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const niceStep = (range, ticks) => {
@@ -79,13 +79,13 @@ export function balanceChart(wrap, series, { onScrub, height = 210 } = {}) {
     path.style.strokeDasharray = `${len}`;
     path.style.strokeDashoffset = `${len}`;
     svg.querySelector('.area').style.opacity = '0';
-    requestAnimationFrame(() => {
+    whenSettled(wrap, () => requestAnimationFrame(() => {
       path.style.transition = 'stroke-dashoffset 1.1s cubic-bezier(.2,.9,.25,1)';
       path.style.strokeDashoffset = '0';
       const a = svg.querySelector('.area');
       a.style.transition = 'opacity .8s ease .35s';
       a.style.opacity = '1';
-    });
+    }));
   }
 
   const cursor = svg.querySelector('.cursor');
@@ -193,9 +193,7 @@ export function stackedColumns(wrap, months, { order, cats, selected, onSelect, 
   });
   wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Spending by month, stacked by category">${g}</svg>`;
   if (!reducedMotion()) {
-    wrap.querySelectorAll('.stack').forEach((s, i) => {
-      s.animate([{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }], { duration: 700, delay: i * 30, easing: 'cubic-bezier(.2,.9,.25,1)', fill: 'backwards' });
-    });
+    growIn(wrap);
   }
   wrap.querySelectorAll('.col').forEach((c) => c.addEventListener('click', () => { haptic(); onSelect?.(c.dataset.ym); }));
 }
@@ -300,10 +298,7 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
   };
   show(def);
   if (!reducedMotion()) {
-    svg.querySelectorAll('.cc-bar path').forEach((p, i) => {
-      p.style.transformOrigin = `0 ${Y(0)}px`; // grows out of the zero line in either direction
-      p.animate([{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }], { duration: 650, delay: i * 25, easing: 'cubic-bezier(.2,.9,.25,1)', fill: 'backwards' });
-    });
+    growIn(wrap);
   }
   const at = (clientX) => {
     const rr = svg.getBoundingClientRect();
@@ -358,8 +353,24 @@ export function ringsSVG(rings, size = 148) {
 export function animateRings(root) {
   const arcs = root.querySelectorAll('.ring-arc');
   if (reducedMotion()) { arcs.forEach((a) => (a.style.strokeDashoffset = a.dataset.target)); return; }
-  requestAnimationFrame(() => requestAnimationFrame(() => arcs.forEach((a, i) => {
+  whenSettled(root, () => requestAnimationFrame(() => requestAnimationFrame(() => arcs.forEach((a, i) => {
     a.style.transitionDelay = `${i * 90}ms`;
     a.style.strokeDashoffset = a.dataset.target;
-  })));
+  }))));
+}
+
+/**
+ * Charts rise into place as one piece. Animating each bar inside the SVG made the browser repaint the
+ * chart on the main thread every frame (choppy on phones); moving the whole chart is done by the GPU.
+ * It waits until its sheet has finished sliding in, and a page that isn't on screen skips the show.
+ */
+function growIn(wrap) {
+  const svg = wrap.querySelector('svg');
+  if (!svg) return;
+  const page = wrap.closest('.page');
+  if (page && !page.classList.contains('active')) return;
+  svg.style.transformOrigin = '50% 100%';
+  const a = svg.animate([{ opacity: 0, transform: 'translateY(10px) scaleY(.96)' }, { opacity: 1, transform: 'none' }], { duration: 460, easing: 'cubic-bezier(.2,.9,.25,1)', fill: 'backwards' });
+  a.pause();
+  whenSettled(wrap, () => requestAnimationFrame(() => a.play()));
 }

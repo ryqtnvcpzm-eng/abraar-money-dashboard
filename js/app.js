@@ -6,7 +6,7 @@ import * as bio from './biometric.js';
 import * as cloud from './cloud.js';
 import { compileRules } from './categorize.js';
 import { emptyVault, buildModel } from './ledger.js';
-import { icon, haptic, toast, closeAllSheets, alertSheet } from './ui.js';
+import { icon, haptic, toast, closeAllSheets, alertSheet, sheetMoving } from './ui.js';
 import { app } from './state.js';
 import { renderOverview } from './views/overview.js';
 import { renderSpending } from './views/spending.js';
@@ -594,21 +594,21 @@ export function rebuild() {
 app.commit = async function commit({ silent = false } = {}) {
   rebuild();
   app.stale = new Set(Object.keys(VIEWS));
-  if (app.demo) { renderTab(app.tab); if (!silent) toast('Sample data isn’t saved', { icon: 'sparkle', color: 'indigo' }); return; }
+  if (app.demo) { renderTab(app.tab); prerenderSoon(); if (!silent) toast('Sample data isn’t saved', { icon: 'sparkle', color: 'indigo' }); return; }
   // Encrypt first, then render once (the screen shows whether it's synced, which depends on the new revision).
   const rev = (app.env?.rev || 0) + 1;
   app.env = await crypto.seal(app.session, app.vault, rev);
   const ok = app.account ? store.saveAccountEnv(app.account, app.env) : store.saveLocal(app.env);
   if (!ok) toast('Couldn’t save on this device — export the file', { icon: 'warn', color: 'orange' });
   if (app.account) scheduleSync();
-  if (app.vault) renderTab(app.tab);
+  if (app.vault) { renderTab(app.tab); prerenderSoon(); }
 };
 app.isDirty = () => {
   if (app.demo || !app.env) return false;
   return app.account ? app.env.rev > store.syncedRev(app.account) : app.env.rev > store.publishedRev();
 };
 app.lock = lock;
-app.rerender = () => { app.stale = new Set(Object.keys(VIEWS)); renderTab(app.tab); };
+app.rerender = () => { app.stale = new Set(Object.keys(VIEWS)); renderTab(app.tab); prerenderSoon(); };
 app.useAccount = useAccount;
 app.showLock = showLock;
 
@@ -793,9 +793,38 @@ export function selectTab(name, { force = false } = {}) {
     t.setAttribute('aria-selected', on);
     t.tabIndex = on ? 0 : -1;
   });
-  document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === `page-${name}`));
   positionLens();
+  // Build the page *before* showing it (never during the swap), then swap instantly and fade its content up.
   if (force || app.stale.has(name)) renderTab(name);
+  document.querySelectorAll('.page').forEach((p) => {
+    const on = p.id === `page-${name}`;
+    const was = p.classList.contains('active');
+    p.classList.toggle('active', on);
+    if (on && !was && !force) { p.classList.remove('entering'); void p.offsetWidth; p.classList.add('entering'); }
+  });
+  prerenderSoon();
+}
+
+// Tabs you're not looking at are rebuilt quietly when nothing is moving, so switching to them is instant.
+// Building a tab takes a while on a phone, so it never runs while an animation is playing or right after
+// you touched something: it would make that animation stutter.
+let prerenderTimer;
+let lastTouch = 0;
+['pointerdown', 'keydown', 'wheel'].forEach((ev) => document.addEventListener(ev, () => { lastTouch = performance.now(); }, { capture: true, passive: true }));
+const animating = () => document.getAnimations().some((a) => a.playState === 'running' && a.effect?.getComputedTiming?.().iterations !== Infinity);
+function prerenderSoon() {
+  clearTimeout(prerenderTimer);
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(() => fn({ timeRemaining: () => 16 }), 50));
+  const next = () => {
+    if (!app.model) return;
+    const name = Object.keys(VIEWS).find((t) => t !== app.tab && app.stale.has(t));
+    if (!name) return;
+    // Not while a sheet is open (you're about to close it), not while anything moves, not right after a touch.
+    if (document.querySelector('.sheet') || animating() || performance.now() - lastTouch < 1500) { prerenderTimer = setTimeout(() => idle(next), 400); return; }
+    renderTab(name);
+    prerenderTimer = setTimeout(() => idle(next), 200); // one tab at a time, then check again
+  };
+  prerenderTimer = setTimeout(() => idle(next), 700);
 }
 app.selectTab = selectTab;
 
