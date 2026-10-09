@@ -1,10 +1,10 @@
 // Service worker: makes Money open offline. Caches only this site's own files.
 // The encrypted vault is fetched network-first so new statements show up, with the cached copy as fallback.
 // Bump VERSION whenever app files change.
-const VERSION = 'money-v1.4.0';
+const VERSION = 'money-v1.5.0';
 const SHELL = [
   './', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/state.js', 'js/format.js', 'js/crypto.js', 'js/store.js', 'js/biometric.js', 'js/ui.js', 'js/charts.js',
+  'js/app.js', 'js/state.js', 'js/format.js', 'js/crypto.js', 'js/store.js', 'js/biometric.js', 'js/cloud.js', 'js/ui.js', 'js/charts.js',
   'js/categorize.js', 'js/cibc-parser.js', 'js/ledger.js', 'js/pdf-text.js', 'js/demo.js',
   'js/views/overview.js', 'js/views/spending.js', 'js/views/activity.js', 'js/views/plan.js',
   'js/views/sheets.js', 'js/views/insight.js', 'js/views/importer.js', 'js/views/settings.js',
@@ -29,6 +29,7 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin) return; // never touch api.github.com etc.
+  if (url.pathname.includes('/api/')) return; // sync API: always live, never cached
 
   if (NETWORK_FIRST.some((r) => r.test(url.pathname))) {
     e.respondWith((async () => {

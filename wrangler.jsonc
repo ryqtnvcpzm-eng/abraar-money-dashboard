@@ -1,15 +1,18 @@
-// Cloudflare deploy config (Workers static assets).
-// Before each deploy Wrangler runs tools/build-site.mjs, which copies only the
-// website files into dist/ — that folder is all that gets published.
+// Cloudflare deploy config: the website (dist/, built by tools/build-site.mjs) plus a small
+// Worker (worker/index.js) that serves the sync API under /api/. The API only stores ciphertext.
 {
   "$schema": "https://unpkg.com/wrangler/config-schema.json",
   "name": "abraar-money-dashboard",
+  "main": "worker/index.js",
   "compatibility_date": "2026-10-06",
   "build": { "command": "node tools/build-site.mjs" },
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "html_handling": "auto-trailing-slash",
     "not_found_handling": "none"
   },
+  // Accounts live in a D1 (SQLite) database. Without a database_id, Wrangler creates it on first deploy.
+  "d1_databases": [{ "binding": "DB", "database_name": "money-accounts" }],
   "observability": { "enabled": false }
 }

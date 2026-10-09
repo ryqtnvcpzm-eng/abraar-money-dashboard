@@ -1,30 +1,32 @@
 # Money
 
-A private, Apple-style finance app for your iPhone home screen. It's a static site you host for free on Cloudflare Pages (or GitHub Pages): no server, no build step, nothing to run.
+A private, Apple-style finance app for your iPhone home screen. It's a static site plus a tiny sync API, hosted for free on Cloudflare Workers: no framework, no bundler, nothing to run.
 
 - **Overview**: balance with a Stocks-style chart you scrub with your finger, money in/out/net, and insight cards
 - **Spending**: by month, Everyday vs Everything, categories, monthly stacked chart, top merchants
 - **Activity**: every transaction, searchable. Re-categorize one, or apply the change to all from a merchant (saved as a rule).
 - **Plan**: budget from your start date, with Saved / Spent / Eating-out rings and budget vs actual
 - **Add Statement**: reads a CIBC PDF on your device, removes duplicates, categorizes, and reconciles to the bank's balances
+- **Accounts**: share the link with family. Everyone gets their own private account with every feature, synced across their iPhone and Mac.
 
-**Privacy:** the repo holds only `data/vault.enc.json`, which is AES-256-GCM encrypted with a key derived from your passphrase (PBKDF2-SHA-256, 600k iterations). Statement PDFs never leave your device and are git-ignored. Account and transit numbers are never stored. The app auto-locks and asks search engines not to index it. See [docs/DESIGN.md](docs/DESIGN.md) for the design and the security model.
+**Privacy:** each account's data is one encrypted vault. The sync server (and the repo, for the original single-user vault `data/vault.enc.json`) only ever holds ciphertext: AES-256-GCM, with a key derived from the owner's passphrase (PBKDF2-SHA-256, 600k iterations). Statement PDFs never leave your device and are git-ignored. Account and transit numbers are never stored. The app auto-locks and asks search engines not to index it. See [docs/DESIGN.md](docs/DESIGN.md) for the design and the security model.
 
 ```
 index.html              app shell (CSP, icon sprite)
 manifest.webmanifest    install metadata
 _headers                security headers (Cloudflare)
-wrangler.jsonc          Cloudflare deploy config (publishes dist/ only)
+wrangler.jsonc          Cloudflare deploy config (publishes dist/ only, D1 database)
+worker/index.js         sync API: stores encrypted vaults per account (Cloudflare D1)
 sw.js                   offline cache (bump VERSION after changing files)
 css/app.css             design system
-js/                     app code: crypto, parser, ledger, charts, views
+js/                     app code: crypto, cloud sync, parser, ledger, charts, views
 data/rules.json         categories + merchant rules (public, edit freely)
-data/vault.enc.json     your data, encrypted (created by the app)
+data/vault.enc.json     original single-user vault, encrypted (optional once you use accounts)
 vendor/pdfjs/           pdf.js, vendored so no code loads from a CDN
 icons/                  app icon + iPhone launch screens
 tools/vault.mjs         command-line check / import / report
 tools/build-site.mjs    copies the website files into dist/ for Cloudflare
-tests/                  parser + reconciliation + crypto tests
+tests/                  parser + reconciliation + crypto + sync API tests
 docs/                   design notes and the vault JSON schema
 ```
 
@@ -68,6 +70,26 @@ GitHub Pages on a **Free** plan needs a **public** repo (a private repo needs Pr
 > ```
 </details>
 
+### 2b. Turn on accounts (so family can use it too)
+
+Accounts let anyone you send the link to make their **own** private account with every feature: statements, plan, insights, Face ID and sync between their devices. Each account is a separate vault encrypted with its owner's passphrase. Nobody, including you as the site owner, can read anyone else's money.
+
+1. **Database.** `wrangler.jsonc` declares a D1 database called `money-accounts`, and Cloudflare creates it automatically on the next deploy (look for "Provisioning" in the build log). If the log shows an error instead: **Storage & Databases → D1 → Create** a database named `money-accounts`, copy its ID, add `"database_id": "<that id>"` next to `"database_name"` in `wrangler.jsonc`, and push.
+2. **Invite code.** In the dashboard open your Worker → **Settings → Variables and Secrets → Add** → type **Secret**, name `INVITE_CODE`, and a value only you know (a few random words). Save. Only people with this code can create accounts.
+3. **Check:** open `https://<your site>/api/v1/status`. It should say `{"configured":true}`. Until both steps are done, the app works exactly as before, with no account option.
+
+**Move your own data into an account:** unlock as usual → Settings → **Move to Cloud Sync**. Pick a username and enter the invite code; your passphrase stays the same. After that, the iPhone and Mac stay in step on their own and you don't need the GitHub token any more.
+
+**Invite someone:** Settings → **Invite Someone** → **Share Link**. Send them the invite code separately (a text is fine). They open the link, tap **Create Account**, choose a username and passphrase, add their statements, and install it to their home screen. Several people can share one device: the lock screen asks who's using Money.
+
+Good to know:
+
+- **A forgotten passphrase can't be reset**, by you or anyone. That's what makes it private. Export Encrypted File (Settings) gives a backup copy.
+- If two devices change the same account offline, the next sync asks which version to keep.
+- Statements are read for **CIBC** accounts. Other banks' PDFs won't import correctly yet.
+- If you turned on Cloudflare Access (below), add each person's email to its policy so they can reach the site.
+- To stop new sign-ups, change or delete `INVITE_CODE`. Existing accounts keep working while it's set; deleting it pauses sync for everyone until it's set again.
+
 ### 3. Create your vault and set your passphrase
 
 Open the site in Safari (on your phone or computer) and tap **Create Your Vault**. Choose a passphrase of at least 12 characters; four or more random words is ideal.
@@ -91,7 +113,7 @@ git add data/vault.enc.json && git commit -m "Add statements" && git push
 
 ### 5. Save the encrypted file to the repo
 
-After the app adds statements, the updated vault is saved (encrypted) on that device. Use one of these to put it in the repo:
+*Skip this if you use an account (step 2b): accounts sync on their own.* Without one, after the app adds statements, the updated vault is saved (encrypted) on that device. Use one of these to put it in the repo:
 
 - **One tap:** Settings → **GitHub Connection**. The repo is filled in already; paste a fine-grained token (see below), then tap **Save to GitHub**. Cloudflare redeploys about a minute later.
 - **By hand:** Settings → **Export Encrypted File**, then commit it as `data/vault.enc.json` (github.com → *Add file → Upload files* into `data/`).
@@ -139,15 +161,17 @@ Duplicates are skipped automatically. If you re-add a month, Money offers to rep
 - **Face ID / Touch ID** (iOS 18+ / macOS 15+): Settings → **Face ID** (or **Touch ID** on a Mac), then enter your passphrase once. Set it up separately on each device. It uses a passkey in iCloud Keychain (WebAuthn PRF) to keep an encrypted copy of the vault key on that device only. Your passphrase is never stored and always works. Changing the passphrase turns Face ID off until you turn it on again.
 - Auto-lock: after 5 minutes idle by default (Settings → Auto-Lock), and when the app has been in the background for over a minute.
 - Change your passphrase in Settings → **Change Passphrase**, then Save to GitHub.
-- **Forget This Device** removes the local encrypted copy and the token from that browser.
+- **Forget This Device** (or **Sign Out on This Device** for an account) removes the local encrypted copy from that browser. **Delete Account** removes an account's data from the server for good.
+- The sync API stores only ciphertext and a SHA-256 hash of a token derived from the passphrase key, so it can't decrypt anything or hand one person's data to another. Wrong-token attempts are throttled per account.
 - Never commit PDFs, CSVs or decrypted exports. `.gitignore` already blocks the common ones.
 
 ## Development
 
 ```bash
 npm install
-npm test          # parser + reconciliation + crypto + privacy tests (needs python3 + reportlab for sample PDFs)
+npm test          # parser + reconciliation + crypto + privacy + sync API tests (needs python3 + reportlab for sample PDFs)
 npm run serve     # http://localhost:8080 — tap "Explore with Sample Data" to try it without a vault
+# accounts locally: put INVITE_CODE=anything in .dev.vars, then `npx wrangler dev` (local D1)
 npm run icons     # re-render icons/splash screens from icons/icon.svg (needs Playwright)
 npm run vendor    # re-copy pdf.js after changing its version in package.json
 ```

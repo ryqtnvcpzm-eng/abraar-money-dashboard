@@ -118,7 +118,9 @@ function banners() {
   if (app.demo) {
     out += `<div class="banner" style="--c:var(--indigo)"><span class="ic">${icon('sparkle')}</span><span class="txt"><b>Sample data</b><span>Made-up numbers to explore the app. Nothing is saved.</span></span><button class="btn small secondary" data-act="exit-demo">Exit</button></div>`;
   } else if (app.isDirty()) {
-    out += `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('upload')}</span><span class="txt"><b>Changes not in your repo yet</b><span>Saved on this device. Save to GitHub to sync.</span></span><button class="btn small" data-act="save">Save</button></div>`;
+    out += app.account
+      ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('arrows')}</span><span class="txt"><b>Not synced yet</b><span>Saved on this device. Syncs automatically when you’re online.</span></span><button class="btn small" data-act="save">Sync</button></div>`
+      : `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('upload')}</span><span class="txt"><b>Changes not in your repo yet</b><span>Saved on this device. Save to GitHub to sync.</span></span><button class="btn small" data-act="save">Save</button></div>`;
   }
   const bad = app.model.statements.filter((s) => !s.reconciled);
   if (bad.length) {
