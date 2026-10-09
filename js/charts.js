@@ -233,31 +233,38 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
   const pad = { t: 18, r: 40, b: 22, l: 2 };
   const iw = W - pad.l - pad.r;
   const ih = H - pad.t - pad.b;
+  // Supports negative values (e.g. a month that saved less than nothing): the baseline sits at 0.
   const maxV = Math.max(1e-9, ...bars.map((b) => b.v), ref ? ref.v : 0);
-  const step = niceStep(maxV, 3);
-  const top = Math.ceil((maxV * 1.08) / step) * step || 1;
-  const Y = (v) => pad.t + ih * (1 - v / top);
+  const minV = Math.min(0, ...bars.map((b) => b.v));
+  const step = niceStep(maxV - minV, 3);
+  const top = Math.ceil((maxV * 1.08) / step) * step || step;
+  const bottom = minV < 0 ? Math.floor((minV * 1.08) / step) * step : 0;
+  const Y = (v) => pad.t + ih * ((top - v) / (top - bottom));
   const band = iw / bars.length;
   const bw = Math.min(24, band * 0.62);
-  let def = bars.findIndex((b) => b.key === highlight);
+  const def = bars.findIndex((b) => b.key === highlight);
   let grid = '';
-  for (let v = step; v <= top + 1e-9; v += step) {
+  for (let v = bottom; v <= top + 1e-9; v += step) {
+    if (Math.abs(v) < 1e-9) continue;
     grid += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(v)}" y2="${Y(v)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
     grid += `<text class="chart-axis" x="${W - 2}" y="${Y(v) + 4}" text-anchor="end">${esc(format(v))}</text>`;
   }
   grid += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(0)}" y2="${Y(0)}" style="stroke:var(--label-3)" stroke-width="1" shape-rendering="crispEdges"/>`;
+  if (bottom < 0) grid += `<text class="chart-axis" x="${W - 2}" y="${Y(0) + 4}" text-anchor="end">${esc(format(0))}</text>`;
   const thin = bars.length > 14;
   const cols = bars.map((b, i) => {
     const cx = pad.l + band * i + band / 2;
     const x = cx - bw / 2;
-    const h = b.v > 0 ? Math.max(2, (ih * b.v) / top) : 0;
-    const y = Y(0) - h;
+    const y0 = Y(0);
+    const h = b.v === 0 ? 0 : Math.max(2, Math.abs(Y(b.v) - y0));
     const r = Math.min(4, h, bw / 2);
-    const path = h ? `M${x},${Y(0)}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${Y(0)}Z` : '';
+    let path = '';
+    if (h && b.v > 0) { const y = y0 - h; path = `M${x},${y0}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${y0}Z`; }
+    if (h && b.v < 0) { const y = y0 + h; path = `M${x},${y0}V${y - r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y - r}V${y0}Z`; }
     const showLabel = !thin || i % 2 === 0 || i === def;
     return `<g class="cc-bar" data-i="${i}">
       <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 34}" fill="transparent"/>
-      ${path ? `<path d="${path}" style="fill:var(--${color});transition:opacity 180ms"/>` : ''}
+      ${path ? `<path d="${path}" style="fill:var(--${b.color || color});transition:opacity 180ms"/>` : ''}
       <text class="chart-axis cc-x" x="${cx}" y="${H - 6}" text-anchor="middle">${showLabel ? esc(b.label) : ''}</text></g>`;
   }).join('');
   const refLine = ref ? `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(ref.v)}" y2="${Y(ref.v)}" style="stroke:var(--label)" stroke-opacity=".55" stroke-width="1.5"/>
@@ -287,7 +294,7 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
   show(def);
   if (!reducedMotion()) {
     svg.querySelectorAll('.cc-bar path').forEach((p, i) => {
-      p.style.transformOrigin = `0 ${Y(0)}px`;
+      p.style.transformOrigin = `0 ${Y(0)}px`; // grows out of the zero line in either direction
       p.animate([{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }], { duration: 650, delay: i * 25, easing: 'cubic-bezier(.2,.9,.25,1)', fill: 'backwards' });
     });
   }
