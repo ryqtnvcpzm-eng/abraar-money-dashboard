@@ -14,5 +14,7 @@
   },
   // Accounts live in a D1 (SQLite) database. Without a database_id, Wrangler creates it on first deploy.
   "d1_databases": [{ "binding": "DB", "database_name": "money-accounts" }],
-  "observability": { "enabled": false }
+  "observability": { "enabled": false },
+  // Keep variables set in the Cloudflare dashboard (PLAID_ENV, PLAID_COUNTRIES…) when a push redeploys.
+  "keep_vars": true
 }
