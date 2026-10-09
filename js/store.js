@@ -38,7 +38,36 @@ export function loadLocal() {
   try { const j = JSON.parse(s); return isEnvelope(j) ? j : null; } catch { return null; }
 }
 export function saveLocal(env) { return ls.set(K.local, JSON.stringify(env)); }
-export function clearLocal() { Object.values(K).forEach((k) => ls.del(k)); }
+/** Forget everything Money stored in this browser (all accounts, copies, tokens, Face ID). */
+export function clearLocal() {
+  try { Object.keys(localStorage).filter((k) => k.startsWith('money.')).forEach((k) => localStorage.removeItem(k)); } catch { /* ignore */ }
+}
+
+// ---------- cloud accounts on this device ----------
+// Each person's encrypted copy and sync state is kept under their username.
+const ACC = 'money.accounts';
+export function accounts() {
+  try { return (JSON.parse(ls.get(ACC) || '[]') || []).sort((a, b) => (b.lastUsed || '').localeCompare(a.lastUsed || '')); } catch { return []; }
+}
+export function rememberAccount(username) {
+  const list = accounts().filter((a) => a.username !== username);
+  list.unshift({ username, lastUsed: new Date().toISOString() });
+  ls.set(ACC, JSON.stringify(list));
+}
+export function forgetAccount(username) {
+  ls.set(ACC, JSON.stringify(accounts().filter((a) => a.username !== username)));
+  ['vault', 'synced', 'syncedAt', 'bio'].forEach((k) => ls.del(`money.${k}@${username}`));
+}
+export function loadAccountEnv(u) {
+  try { const j = JSON.parse(ls.get(`money.vault@${u}`) || 'null'); return isEnvelope(j) ? j : null; } catch { return null; }
+}
+export const saveAccountEnv = (u, env) => ls.set(`money.vault@${u}`, JSON.stringify(env));
+export function dropAccountEnv(u) { ['vault', 'synced', 'syncedAt'].forEach((k) => ls.del(`money.${k}@${u}`)); }
+export const syncedRev = (u) => Number(ls.get(`money.synced@${u}`) || 0);
+export function setSynced(u, rev) { ls.set(`money.synced@${u}`, String(rev)); ls.set(`money.syncedAt@${u}`, new Date().toISOString()); }
+export const syncedAt = (u) => ls.get(`money.syncedAt@${u}`);
+/** The repo-file vault on this device moved to the cloud: drop the old single-vault copy. */
+export function retireLegacy() { [K.local, K.published, K.token, K.gh, 'money.bio'].forEach((k) => ls.del(k)); }
 
 /** The rev last known to be in the repo (to show "unsaved changes"). */
 export const publishedRev = () => Number(ls.get(K.published) || 0);

@@ -477,6 +477,13 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
 .app-icon { width: 96px; height: 96px; border-radius: 22px; margin: 0 auto 18px; box-shadow: 0 10px 30px rgba(0, 0, 0, .18); display: block; }
 .lock-inner h1 { margin: 0 0 6px; }
 .lock-inner p.lead { margin: 0 auto 26px; color: var(--label-2); font: 400 17px/22px var(--font); max-width: 300px; }
+.avatar { display: inline-grid; place-items: center; flex: none; border-radius: 50%; color: #fff; font-weight: 600; font-family: var(--font-rounded);
+  background: linear-gradient(135deg, hsl(var(--h) 75% 62%), hsl(calc(var(--h) + 35) 70% 46%)); box-shadow: inset 0 0 0 .5px rgba(255,255,255,.25); }
+.lock-avatar { display: block; width: max-content; margin: 0 auto 10px; }
+.lock-avatar .avatar { box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.lock-user { display: block; color: var(--label); font: 600 20px/25px var(--font-display); margin-bottom: 4px; }
+.account-list { text-align: left; margin-bottom: 4px; }
+.account-list .row { --sep-left: 68px; }
 .lock-form { display: grid; gap: 12px; text-align: left; }
 .lock-form .err { color: var(--red); font: 400 13px/18px var(--font); min-height: 18px; text-align: center; }
 .lock-links { margin-top: 26px; display: grid; gap: 4px; }

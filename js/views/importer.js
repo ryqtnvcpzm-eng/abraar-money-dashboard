@@ -28,7 +28,9 @@ export function openImporter({ welcome = false } = {}) {
           <div class="name">Added ${plural(done.statements, 'statement')}</div>
           <div class="when">${plural(done.txns, 'transaction')} · encrypted on this device</div>
         </div>
-        ${app.demo ? '<p class="list-foot" style="text-align:center">Sample mode: nothing is saved.</p>' : `
+        ${app.demo ? '<p class="list-foot" style="text-align:center">Sample mode: nothing is saved.</p>' : app.account ? `
+        <p class="list-foot" style="text-align:center;margin-bottom:12px">Syncing to @${esc(app.account)}, so your other devices get it automatically.</p>
+        <div class="btn-row"><button class="btn" data-close>Done</button></div>` : `
         <p class="list-foot" style="margin-bottom:12px">Your repo still has the old file. Save the updated encrypted vault so your other devices get it.</p>
         <div class="btn-row">
           <button class="btn" data-act="push">${icon('github')} Save to GitHub</button>

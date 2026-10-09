@@ -11,13 +11,14 @@ import { b64, unb64, randomBytes } from './crypto.js';
 
 const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
-const KEY = 'money.bio';
+// One enrolment per person: the repo-file vault uses 'money.bio', cloud accounts 'money.bio@<username>'.
+const keyFor = (id) => (!id || id === 'legacy' ? 'money.bio' : `money.bio@${id}`);
 const PRF_INPUT = enc.encode('abraar-money/biometric-unlock/v1');
 
 const ls = {
-  get() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; } },
-  set(v) { try { localStorage.setItem(KEY, JSON.stringify(v)); return true; } catch { return false; } },
-  del() { try { localStorage.removeItem(KEY); } catch { /* ignore */ } },
+  get(id) { try { return JSON.parse(localStorage.getItem(keyFor(id)) || 'null'); } catch { return null; } },
+  set(id, v) { try { localStorage.setItem(keyFor(id), JSON.stringify(v)); return true; } catch { return false; } },
+  del(id) { try { localStorage.removeItem(keyFor(id)); } catch { /* ignore */ } },
 };
 
 /** "Face ID" on iPhone, "Touch ID" on Mac/iPad, a generic name elsewhere. */
@@ -41,12 +42,12 @@ export async function isSupported() {
   } catch { return false; }
 }
 
-export const enrollment = () => ls.get();
-export const disable = () => ls.del();
+export const enrollment = (id) => ls.get(id);
+export const disable = (id) => ls.del(id);
 
 /** Usable for this vault? (A passphrase change gives the vault a new salt and retires the old copy.) */
-export function isEnrolledFor(env) {
-  const e = ls.get();
+export function isEnrolledFor(env, id) {
+  const e = ls.get(id);
   return !!(e && env && e.salt === env.kdf.salt);
 }
 
@@ -77,11 +78,11 @@ async function evaluate(credentialId) {
  * Turn on biometric unlock. `keyBits` are the raw vault-key bytes (from crypto.deriveKeyBits)
  * and `env` the current vault envelope. May show Face ID / Touch ID twice on first setup.
  */
-export async function enroll(keyBits, env) {
+export async function enroll(keyBits, env, who) {
   const cred = await navigator.credentials.create({
     publicKey: {
       rp: { name: 'Money' },
-      user: { id: randomBytes(16), name: 'Money vault', displayName: 'Money vault' },
+      user: { id: randomBytes(16), name: who && who !== 'legacy' ? `Money · ${who}` : 'Money vault', displayName: who && who !== 'legacy' ? `Money · ${who}` : 'Money vault' },
       challenge: randomBytes(32),
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
       authenticatorSelection: { authenticatorAttachment: 'platform', residentKey: 'required', userVerification: 'required' },
@@ -97,12 +98,12 @@ export async function enroll(keyBits, env) {
   const iv = randomBytes(12);
   const ct = await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(env.kdf.salt) }, await wrapKey(out), keyBits);
   out.fill(0);
-  ls.set({ v: 1, credentialId: b64(id), iv: b64(iv), ct: b64(ct), salt: env.kdf.salt, createdAt: new Date().toISOString() });
+  ls.set(who, { v: 1, credentialId: b64(id), iv: b64(iv), ct: b64(ct), salt: env.kdf.salt, createdAt: new Date().toISOString() });
 }
 
 /** Ask for Face ID / Touch ID and return a vault session { key, salt, iterations }. */
-export async function unlock(env) {
-  const e = ls.get();
+export async function unlock(env, id) {
+  const e = ls.get(id);
   if (!e || e.salt !== env.kdf.salt) throw new Error('NOT_ENROLLED');
   const out = await evaluate(unb64(e.credentialId));
   let bits;

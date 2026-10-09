@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Private, encrypted personal finance PWA for GitHub Pages. No build step: the site is the repo.",
   "scripts": {
-    "test": "node tests/run.mjs",
+    "test": "node tests/run.mjs && node --no-warnings tests/cloud.mjs",
     "serve": "npx --yes http-server -c-1 -p 8080 .",
     "vendor": "node tools/vendor-pdfjs.mjs",
     "import": "node tools/vault.mjs import",

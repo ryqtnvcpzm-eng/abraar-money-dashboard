@@ -3,6 +3,7 @@ import { esc } from './format.js';
 import * as crypto from './crypto.js';
 import * as store from './store.js';
 import * as bio from './biometric.js';
+import * as cloud from './cloud.js';
 import { compileRules } from './categorize.js';
 import { emptyVault, buildModel } from './ledger.js';
 import { icon, haptic, toast, closeAllSheets, alertSheet } from './ui.js';
@@ -21,6 +22,9 @@ const appEl = document.getElementById('app');
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+// Two kinds of vault:
+//   • cloud accounts (username + passphrase, synced through the Cloudflare API) — one per person
+//   • the original single vault (data/vault.enc.json in the repo, or a copy kept on this device)
 async function boot() {
   registerSW();
   try {
@@ -30,150 +34,380 @@ async function boot() {
     lockLead.textContent = 'Could not load the app files. Check your connection and reload.';
     return;
   }
-  const [remote, local] = [await store.fetchRemote() || await store.fetchRemoteCached(), store.loadLocal()];
+  const [remote, local, bioOK, cloudOK] = await Promise.all([
+    store.fetchRemote().then((r) => r || store.fetchRemoteCached()), store.loadLocal(), bio.isSupported(), cloud.available(),
+  ]);
   if (remote) store.setPublishedRev(Math.max(store.publishedRev(), remote.rev));
-  app.bioSupported = await bio.isSupported();
-  const chosen = store.chooseVault(remote, local);
-  app.env = chosen?.env || null;
+  app.bioSupported = bioOK;
+  app.cloudOK = cloudOK;
+  app.legacyEnv = store.chooseVault(remote, local)?.env || null;
+  const accounts = store.accounts();
+  if (accounts.length) useAccount(accounts[0].username);
+  // With accounts available, a new device starts at Sign In / Create Account, not someone else's vault.
+  else if (cloudOK && !local) { app.account = null; app.env = null; }
+  else useLegacy();
   showLock();
 }
+
+function useAccount(username) {
+  app.account = username;
+  app.env = store.loadAccountEnv(username);
+}
+function useLegacy() {
+  app.account = null;
+  app.env = app.legacyEnv;
+}
+const bioId = () => app.account || 'legacy';
+app.bioId = bioId;
 
 // ---------------------------------------------------------------------------
 // Lock screen
 // ---------------------------------------------------------------------------
+const avatar = (u, size = 64) => {
+  const hue = [...u].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+  return `<span class="avatar" style="--h:${hue};width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px">${esc(u.slice(0, 1).toUpperCase())}</span>`;
+};
+
 function showLock(message = '') {
   closeAllSheets();
   appEl.hidden = true;
   lockEl.hidden = false;
   lockEl.classList.remove('leaving');
-  if (app.env) {
-    // A passphrase change elsewhere gives the vault a new salt; the old biometric copy can't open it.
-    if (bio.enrollment() && !bio.isEnrolledFor(app.env)) {
-      bio.disable();
-      message ||= `${bio.label()} was turned off because your passphrase changed. Unlock once with it to turn ${bio.label()} back on in Settings.`;
-    }
-    const useBio = app.bioSupported && bio.isEnrolledFor(app.env);
-    lockLead.textContent = useBio ? `Unlock with ${bio.label()} or your passphrase.` : 'Enter your passphrase to unlock.';
-    lockBody.innerHTML = `
-      ${useBio ? `<div class="btn-row" style="margin:0 0 18px"><button class="btn" type="button" id="bio-btn">${icon(bio.label() === 'Face ID' ? 'faceid' : 'touchid')} Unlock with ${esc(bio.label())}</button></div>` : ''}
-      <form class="lock-form" id="unlock-form" autocomplete="off">
-        <input type="text" name="username" value="money-vault" autocomplete="username" hidden>
-        <input class="field" id="pass" type="password" autocomplete="current-password" placeholder="Passphrase" aria-label="Passphrase" required>
-        <button class="btn ${useBio ? 'secondary' : ''}" type="submit" id="unlock-btn">${useBio ? 'Use Passphrase' : 'Unlock'}</button>
-        <div class="err" id="lock-err" role="alert">${esc(message)}</div>
-      </form>
-      <div class="lock-links">
-        <button type="button" data-act="demo">Explore with sample data</button>
-        <button type="button" data-act="file">Open a different vault file…</button>
-      </div>`;
-    const form = document.getElementById('unlock-form');
-    const pass = document.getElementById('pass');
-    const err = document.getElementById('lock-err');
-    if (useBio) {
-      const bioBtn = document.getElementById('bio-btn');
-      const tryBio = async () => {
-        bioBtn.disabled = true;
-        err.textContent = '';
-        try {
-          const session = await bio.unlock(app.env);
-          const data = await crypto.openWithSession(app.env, session);
-          enter({ session, vault: data, demo: false });
-        } catch (e) {
-          bioBtn.disabled = false;
-          if (e?.name === 'NotAllowedError' || e?.name === 'AbortError') return; // cancelled or timed out
-          if (e?.message === 'WRAP_INVALID' || e?.message === 'WRONG_PASSPHRASE') {
-            bio.disable();
-            err.textContent = `${bio.label()} couldn't unlock this vault, so it's been turned off. Use your passphrase.`;
-            document.getElementById('bio-btn')?.parentElement.remove();
-          } else {
-            err.textContent = `${bio.label()} didn't work this time. Use your passphrase.`;
-          }
-          haptic('error');
-        }
-      };
-      bioBtn.addEventListener('click', tryBio);
-      // Offer it straight away when the app opens (not right after the user locked it on purpose).
-      if (!app.bioPrompted && !message) { app.bioPrompted = true; setTimeout(tryBio, 350); }
-    } else {
-      setTimeout(() => pass.focus(), 300);
-    }
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = document.getElementById('unlock-btn');
-      const label = btn.textContent;
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span>';
-      try {
-        const { session, data } = await crypto.open(app.env, pass.value);
-        pass.value = '';
-        enter({ session, vault: data, demo: false });
-      } catch {
-        haptic('error');
-        btn.disabled = false;
-        btn.textContent = label;
-        err.textContent = 'Incorrect passphrase. Try again.';
-        form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
-        pass.select();
-      }
-    });
-  } else {
-    lockLead.textContent = 'Your money, private by design. Everything is encrypted with a passphrase only you know.';
-    lockBody.innerHTML = `
-      <div class="btn-row">
-        <button class="btn" data-act="setup">Create Your Vault</button>
-        <button class="btn secondary" data-act="file">Open a Vault File…</button>
-        <button class="btn plain" data-act="demo">Explore with Sample Data</button>
-      </div>`;
-  }
+  lockEl.querySelector('.app-icon').hidden = false;
+  if (app.account) return showAccountLock(message);
+  if (app.env) return showLegacyLock(message);
+  return showWelcome(message);
+}
+
+/** First screen on a new device. */
+function showWelcome(message = '') {
+  lockLead.textContent = app.cloudOK
+    ? 'Your money, private by design. Sign in, or create your own account. Everything is encrypted with a passphrase only you know.'
+    : 'Your money, private by design. Everything is encrypted with a passphrase only you know.';
+  lockBody.innerHTML = `
+    <div class="btn-row">
+      ${app.cloudOK ? `<button class="btn" data-act="signin">Sign In</button>
+      <button class="btn secondary" data-act="create">Create Account</button>` : `<button class="btn" data-act="setup">Create Your Vault</button>
+      <button class="btn secondary" data-act="file">Open a Vault File…</button>`}
+      <button class="btn plain" data-act="demo">Explore with Sample Data</button>
+    </div>
+    ${message ? `<div class="err" role="alert" style="margin-top:8px">${esc(message)}</div>` : ''}
+    ${app.cloudOK ? `<div class="lock-links">${store.accounts().length ? '<button type="button" data-act="accounts">Accounts on this device</button>' : ''}
+      ${app.legacyEnv ? '<button type="button" data-act="legacy">Open the original vault</button>' : '<button type="button" data-act="setup">Use without an account (this device only)</button>'}</div>` : ''}`;
+  wireLockLinks();
+}
+
+/** Remembered accounts on this device — like the macOS login window. */
+function showAccounts() {
+  const list = store.accounts();
+  lockLead.textContent = 'Who’s using Money?';
+  lockBody.innerHTML = `
+    <div class="list account-list">${list.map((a) => `
+      <button class="row tap" data-user="${esc(a.username)}">${avatar(a.username, 40)}
+        <span class="main"><span class="title">@${esc(a.username)}</span><span class="subtitle">${bio.isEnrolledFor(store.loadAccountEnv(a.username), a.username) ? bio.label() : 'Passphrase'}</span></span>${icon('chev-r', 'chev')}</button>`).join('')}
+    </div>
+    <div class="btn-row">
+      ${app.cloudOK ? '<button class="btn secondary" data-act="signin">Sign In to Another Account</button><button class="btn plain" data-act="create">Create Account</button>' : ''}
+    </div>
+    ${app.legacyEnv ? '<div class="lock-links"><button type="button" data-act="legacy">Open the original vault</button></div>' : ''}`;
   lockBody.onclick = (e) => {
-    const a = e.target.closest('[data-act]')?.dataset.act;
-    if (a === 'setup') showSetup();
-    if (a === 'demo') startDemo();
-    if (a === 'file') pickVaultFile();
+    const u = e.target.closest('[data-user]')?.dataset.user;
+    if (u) { haptic(); useAccount(u); app.bioPrompted = false; showLock(); return; }
+    handleLink(e);
   };
 }
 
-function showSetup() {
-  lockLead.textContent = 'Choose a passphrase. It encrypts everything, and it can’t be recovered — so write it down somewhere safe.';
+function showAccountLock(message = '') {
+  const u = app.account;
+  const env = app.env;
+  if (env && bio.enrollment(u) && !bio.isEnrolledFor(env, u)) {
+    bio.disable(u);
+    message ||= `${bio.label()} was turned off because the passphrase changed. Unlock once with it to turn ${bio.label()} back on.`;
+  }
+  const useBio = !!env && app.bioSupported && bio.isEnrolledFor(env, u);
+  lockEl.querySelector('.app-icon').hidden = true;
+  lockLead.innerHTML = `<span class="lock-avatar">${avatar(u, 76)}</span><b class="lock-user">@${esc(u)}</b><br>${useBio ? `Unlock with ${esc(bio.label())} or your passphrase.` : env ? 'Enter your passphrase to unlock.' : 'Enter your passphrase to sign in on this device.'}`;
   lockBody.innerHTML = `
-    <form class="lock-form" id="setup-form" autocomplete="off">
+    ${useBio ? `<div class="btn-row" style="margin:0 0 18px"><button class="btn" type="button" id="bio-btn">${icon(bio.label() === 'Face ID' ? 'faceid' : 'touchid')} Unlock with ${esc(bio.label())}</button></div>` : ''}
+    <form class="lock-form" id="unlock-form" autocomplete="on">
+      <input type="text" name="username" value="${esc(u)}" autocomplete="username" hidden>
+      <input class="field" id="pass" type="password" autocomplete="current-password" placeholder="Passphrase" aria-label="Passphrase" required>
+      <button class="btn ${useBio ? 'secondary' : ''}" type="submit" id="unlock-btn">${useBio ? 'Use Passphrase' : 'Unlock'}</button>
+      <div class="err" id="lock-err" role="alert">${esc(message)}</div>
+    </form>
+    <div class="lock-links"><button type="button" data-act="accounts">${store.accounts().length > 1 ? 'Switch account' : 'Use another account'}</button></div>`;
+  wireUnlock({
+    useBio,
+    unlockBio: async () => {
+      const session = await bio.unlock(env, u);
+      return { session, data: await crypto.openWithSession(env, session) };
+    },
+    unlockPass: async (pass) => {
+      if (env) {
+        try { return await crypto.open(env, pass); } catch (e) {
+          if (!app.cloudOK) throw e; // offline: it really is the wrong passphrase for this copy
+        }
+      }
+      // No usable copy on this device (e.g. the passphrase changed on another device): fetch it.
+      const r = await cloud.signIn(u, pass);
+      store.saveAccountEnv(u, r.env); store.setSynced(u, r.env.rev);
+      app.env = r.env;
+      return { session: r.session, data: r.vault };
+    },
+    message,
+  });
+  wireLockLinks();
+}
+
+function showLegacyLock(message = '') {
+  if (bio.enrollment('legacy') && !bio.isEnrolledFor(app.env, 'legacy')) {
+    bio.disable('legacy');
+    message ||= `${bio.label()} was turned off because your passphrase changed. Unlock once with it to turn ${bio.label()} back on in Settings.`;
+  }
+  const useBio = app.bioSupported && bio.isEnrolledFor(app.env, 'legacy');
+  lockLead.textContent = useBio ? `Unlock with ${bio.label()} or your passphrase.` : 'Enter your passphrase to unlock.';
+  lockBody.innerHTML = `
+    ${useBio ? `<div class="btn-row" style="margin:0 0 18px"><button class="btn" type="button" id="bio-btn">${icon(bio.label() === 'Face ID' ? 'faceid' : 'touchid')} Unlock with ${esc(bio.label())}</button></div>` : ''}
+    <form class="lock-form" id="unlock-form" autocomplete="off">
       <input type="text" name="username" value="money-vault" autocomplete="username" hidden>
-      <input class="field" id="p1" type="password" autocomplete="new-password" placeholder="New passphrase" aria-label="New passphrase" minlength="12" required>
-      <div class="meter" aria-hidden="true"><i id="meter"></i></div>
-      <div class="hint" id="hint">At least 12 characters. Four random words work well.</div>
-      <input class="field" id="p2" type="password" autocomplete="new-password" placeholder="Confirm passphrase" aria-label="Confirm passphrase" required>
-      <button class="btn" type="submit" id="create-btn">Create Vault</button>
+      <input class="field" id="pass" type="password" autocomplete="current-password" placeholder="Passphrase" aria-label="Passphrase" required>
+      <button class="btn ${useBio ? 'secondary' : ''}" type="submit" id="unlock-btn">${useBio ? 'Use Passphrase' : 'Unlock'}</button>
+      <div class="err" id="lock-err" role="alert">${esc(message)}</div>
+    </form>
+    <div class="lock-links">
+      ${app.cloudOK ? '<button type="button" data-act="signin">Sign in to an account</button><button type="button" data-act="create">Create an account</button>' : ''}
+      <button type="button" data-act="demo">Explore with sample data</button>
+      <button type="button" data-act="file">Open a different vault file…</button>
+    </div>`;
+  const env = app.env;
+  wireUnlock({
+    useBio,
+    unlockBio: async () => {
+      const session = await bio.unlock(env, 'legacy');
+      return { session, data: await crypto.openWithSession(env, session) };
+    },
+    unlockPass: (pass) => crypto.open(env, pass),
+    message,
+  });
+  wireLockLinks();
+}
+
+/** Shared Face ID / passphrase wiring for both lock screens. */
+function wireUnlock({ useBio, unlockBio, unlockPass, message }) {
+  const form = document.getElementById('unlock-form');
+  const pass = document.getElementById('pass');
+  const err = document.getElementById('lock-err');
+  if (useBio) {
+    const bioBtn = document.getElementById('bio-btn');
+    const tryBio = async () => {
+      bioBtn.disabled = true;
+      err.textContent = '';
+      try {
+        const { session, data } = await unlockBio();
+        enter({ session, vault: data, demo: false });
+      } catch (e) {
+        bioBtn.disabled = false;
+        if (e?.name === 'NotAllowedError' || e?.name === 'AbortError') return;
+        if (e?.message === 'WRAP_INVALID' || e?.message === 'WRONG_PASSPHRASE') {
+          bio.disable(bioId());
+          err.textContent = `${bio.label()} couldn't unlock this vault, so it's been turned off. Use your passphrase.`;
+          bioBtn.parentElement.remove();
+        } else {
+          err.textContent = `${bio.label()} didn't work this time. Use your passphrase.`;
+        }
+        haptic('error');
+      }
+    };
+    bioBtn.addEventListener('click', tryBio);
+    if (!app.bioPrompted && !message) { app.bioPrompted = true; setTimeout(tryBio, 350); }
+  } else {
+    setTimeout(() => pass.focus(), 300);
+  }
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('unlock-btn');
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>';
+    try {
+      const { session, data } = await unlockPass(pass.value);
+      pass.value = '';
+      enter({ session, vault: data, demo: false });
+    } catch (ex) {
+      haptic('error');
+      btn.disabled = false;
+      btn.textContent = label;
+      err.textContent = cloudMessage(ex) || 'Incorrect passphrase. Try again.';
+      form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
+      pass.select();
+    }
+  });
+}
+
+function cloudMessage(e) {
+  return {
+    wrong_credentials: 'Username or passphrase is incorrect.',
+    bad_invite: 'That invite code isn’t right. Ask the person who shared Money with you.',
+    username_taken: 'That username is taken. Try another.',
+    bad_username: 'Usernames are 3–32 letters, numbers, dots, dashes or underscores.',
+    too_many_attempts: 'Too many tries. Wait 15 minutes, then try again.',
+    offline: 'You’re offline. Connect to the internet and try again.',
+    not_configured: 'Accounts aren’t set up on this site yet.',
+  }[e?.code] || (e?.status ? `Something went wrong (${e.status}). Try again.` : '');
+}
+
+function handleLink(e) {
+  const a = e.target.closest('[data-act]')?.dataset.act;
+  if (!a) return false;
+  haptic();
+  if (a === 'setup') showSetup();
+  if (a === 'demo') startDemo();
+  if (a === 'file') pickVaultFile();
+  if (a === 'signin') showSignIn();
+  if (a === 'create') showCreateAccount();
+  if (a === 'accounts') store.accounts().length ? showAccounts() : showWelcome();
+  if (a === 'legacy') { useLegacy(); showLock(); }
+  if (a === 'back') showLock();
+  return true;
+}
+// (Wrapped: an onclick handler that returns false cancels the click, which would block form submits.)
+function wireLockLinks() { lockBody.onclick = (e) => { handleLink(e); }; }
+
+function showSignIn() {
+  lockEl.querySelector('.app-icon').hidden = false;
+  lockLead.textContent = 'Sign in with your username and passphrase.';
+  lockBody.innerHTML = `
+    <form class="lock-form" id="signin-form" autocomplete="on">
+      <input class="field" id="si-user" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Username" aria-label="Username" required>
+      <input class="field" id="si-pass" type="password" autocomplete="current-password" placeholder="Passphrase" aria-label="Passphrase" required>
+      <button class="btn" type="submit" id="si-btn">Sign In</button>
       <div class="err" id="lock-err" role="alert"></div>
     </form>
-    <div class="lock-links"><button type="button" data-act="back">Back</button></div>`;
+    <div class="lock-links"><button type="button" data-act="create">Create an account instead</button><button type="button" data-act="back">Back</button></div>`;
+  setTimeout(() => document.getElementById('si-user').focus(), 250);
+  document.getElementById('signin-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('lock-err');
+    const btn = document.getElementById('si-btn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+    try {
+      const r = await cloud.signIn(document.getElementById('si-user').value, document.getElementById('si-pass').value);
+      document.getElementById('si-pass').value = '';
+      store.rememberAccount(r.username);
+      store.saveAccountEnv(r.username, r.env);
+      store.setSynced(r.username, r.env.rev);
+      app.account = r.username;
+      app.env = r.env;
+      enter({ session: r.session, vault: r.vault, demo: false });
+    } catch (ex) {
+      haptic('error');
+      err.textContent = cloudMessage(ex) || 'Couldn’t sign in. Try again.';
+      btn.disabled = false; btn.textContent = 'Sign In';
+    }
+  });
+  wireLockLinks();
+}
+
+function passphraseFields() {
+  return `
+    <input class="field" id="p1" type="password" autocomplete="new-password" placeholder="New passphrase" aria-label="New passphrase" minlength="12" required>
+    <div class="meter" aria-hidden="true"><i id="meter"></i></div>
+    <div class="hint" id="hint">At least 12 characters. Four random words work well.</div>
+    <input class="field" id="p2" type="password" autocomplete="new-password" placeholder="Confirm passphrase" aria-label="Confirm passphrase" required>`;
+}
+function wireMeter() {
   const p1 = document.getElementById('p1');
   const meter = document.getElementById('meter');
   const hint = document.getElementById('hint');
-  setTimeout(() => p1.focus(), 200);
   p1.addEventListener('input', () => {
     const bits = crypto.strength(p1.value);
     const lvl = bits < 40 ? ['red', 'Weak'] : bits < 60 ? ['orange', 'Okay'] : bits < 80 ? ['green', 'Strong'] : ['green', 'Very strong'];
     meter.style.width = Math.min(100, bits) + '%';
     meter.style.setProperty('--c', `var(--${lvl[0]})`);
-    hint.textContent = p1.value.length < 12 ? 'At least 12 characters. Four random words work well.' : `${lvl[1]}. Your vault file is public, so a long passphrase is what keeps it private.`;
+    hint.textContent = p1.value.length < 12 ? 'At least 12 characters. Four random words work well.' : `${lvl[1]}. It can’t be recovered, so keep it in your password manager.`;
   });
-  document.getElementById('setup-form').addEventListener('submit', async (e) => {
+}
+function checkNewPassphrase(err) {
+  const v1 = document.getElementById('p1').value, v2 = document.getElementById('p2').value;
+  if (v1.length < 12) { err.textContent = 'Use at least 12 characters.'; haptic('error'); return null; }
+  if (crypto.strength(v1) < 40) { err.textContent = 'That passphrase is too easy to guess. Add another word or two.'; haptic('error'); return null; }
+  if (v1 !== v2) { err.textContent = 'The passphrases don’t match.'; haptic('error'); return null; }
+  return v1;
+}
+
+function showCreateAccount() {
+  lockEl.querySelector('.app-icon').hidden = false;
+  lockLead.textContent = 'Create your own private account. Only you can see what’s in it.';
+  lockBody.innerHTML = `
+    <form class="lock-form" id="create-form" autocomplete="on">
+      <input class="field" id="ca-invite" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Invite code" aria-label="Invite code" required>
+      <input class="field" id="ca-user" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Choose a username" aria-label="Username" required>
+      ${passphraseFields()}
+      <button class="btn" type="submit" id="ca-btn">Create Account</button>
+      <div class="err" id="lock-err" role="alert"></div>
+    </form>
+    <p class="hint" style="text-align:center;margin-top:10px">Your passphrase encrypts everything on your device. It can’t be reset, by anyone.</p>
+    <div class="lock-links"><button type="button" data-act="signin">I already have an account</button><button type="button" data-act="back">Back</button></div>`;
+  wireMeter();
+  setTimeout(() => document.getElementById('ca-invite').focus(), 250);
+  document.getElementById('create-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = document.getElementById('lock-err');
-    const v1 = p1.value, v2 = document.getElementById('p2').value;
-    if (v1.length < 12) { err.textContent = 'Use at least 12 characters.'; haptic('error'); return; }
-    if (crypto.strength(v1) < 40) { err.textContent = 'That passphrase is too easy to guess. Add another word or two.'; haptic('error'); return; }
-    if (v1 !== v2) { err.textContent = 'The passphrases don’t match.'; haptic('error'); return; }
+    const username = cloud.normUser(document.getElementById('ca-user').value);
+    if (!cloud.USER_RE.test(username)) { err.textContent = cloudMessage({ code: 'bad_username' }); haptic('error'); return; }
+    const pass = checkNewPassphrase(err);
+    if (!pass) return;
+    const btn = document.getElementById('ca-btn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+    try {
+      const vault = emptyVault();
+      const r = await cloud.createAccount({ invite: document.getElementById('ca-invite').value.trim(), username, passphrase: pass, vault });
+      document.getElementById('p1').value = ''; document.getElementById('p2').value = '';
+      store.rememberAccount(r.username);
+      store.saveAccountEnv(r.username, r.env);
+      store.setSynced(r.username, r.env.rev);
+      app.account = r.username;
+      app.env = r.env;
+      enter({ session: r.session, vault, demo: false, firstRun: true });
+    } catch (ex) {
+      haptic('error');
+      err.textContent = cloudMessage(ex) || 'Couldn’t create the account. Try again.';
+      btn.disabled = false; btn.textContent = 'Create Account';
+    }
+  });
+  wireLockLinks();
+}
+
+/** A vault kept only on this device (or committed to the repo), no account. */
+function showSetup() {
+  lockEl.querySelector('.app-icon').hidden = false;
+  lockLead.textContent = 'Choose a passphrase. It encrypts everything, and it can’t be recovered — so write it down somewhere safe.';
+  lockBody.innerHTML = `
+    <form class="lock-form" id="setup-form" autocomplete="off">
+      <input type="text" name="username" value="money-vault" autocomplete="username" hidden>
+      ${passphraseFields()}
+      <button class="btn" type="submit" id="create-btn">Create Vault</button>
+      <div class="err" id="lock-err" role="alert"></div>
+    </form>
+    <div class="lock-links"><button type="button" data-act="back">Back</button></div>`;
+  wireMeter();
+  setTimeout(() => document.getElementById('p1').focus(), 200);
+  document.getElementById('setup-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pass = checkNewPassphrase(document.getElementById('lock-err'));
+    if (!pass) return;
     const btn = document.getElementById('create-btn');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
-    const session = await crypto.createSession(v1);
-    p1.value = ''; document.getElementById('p2').value = '';
+    const session = await crypto.createSession(pass);
+    document.getElementById('p1').value = ''; document.getElementById('p2').value = '';
     const vault = emptyVault();
+    app.account = null;
     app.env = await crypto.seal(session, vault, 1);
     store.saveLocal(app.env);
+    app.legacyEnv = app.env;
     enter({ session, vault, demo: false, firstRun: true });
   });
-  lockBody.onclick = (e) => { if (e.target.closest('[data-act="back"]')) showLock(); };
+  wireLockLinks();
 }
 
 function pickVaultFile() {
@@ -186,8 +420,9 @@ function pickVaultFile() {
     try {
       const env = JSON.parse(await f.text());
       if (!crypto.isEnvelope(env)) throw new Error();
-      app.env = env;
       store.saveLocal(env);
+      app.legacyEnv = env;
+      useLegacy();
       showLock();
       toast('Vault file loaded');
     } catch { toast('That isn’t a Money vault file', { icon: 'warn', color: 'orange' }); }
@@ -208,6 +443,7 @@ function enter({ session, vault, demo, firstRun = false }) {
   app.vault = vault;
   app.demo = demo;
   vault.settings ||= { autoLockMinutes: 5 };
+  if (app.account && !demo) store.rememberAccount(app.account);
   rebuild();
   lockEl.classList.add('leaving');
   appEl.hidden = false;
@@ -217,11 +453,12 @@ function enter({ session, vault, demo, firstRun = false }) {
   startAutoLock();
   haptic();
   if (firstRun) setTimeout(() => import('./views/importer.js').then((m) => m.openImporter({ welcome: true })), 600);
+  if (app.account && !demo) pullLatest();
 }
 
 export function rebuild() { app.model = buildModel(app.vault, app.rules); }
 
-/** Persist a change: re-encrypt, store the working copy, re-render. */
+/** Persist a change: re-encrypt, store the working copy, sync, re-render. */
 app.commit = async function commit({ silent = false } = {}) {
   rebuild();
   app.stale = new Set(Object.keys(VIEWS));
@@ -229,21 +466,121 @@ app.commit = async function commit({ silent = false } = {}) {
   if (app.demo) { if (!silent) toast('Sample data isn’t saved', { icon: 'sparkle', color: 'indigo' }); return; }
   const rev = (app.env?.rev || 0) + 1;
   app.env = await crypto.seal(app.session, app.vault, rev);
-  if (!store.saveLocal(app.env)) toast('Couldn’t save on this device — export the file', { icon: 'warn', color: 'orange' });
+  const ok = app.account ? store.saveAccountEnv(app.account, app.env) : store.saveLocal(app.env);
+  if (!ok) toast('Couldn’t save on this device — export the file', { icon: 'warn', color: 'orange' });
+  if (app.account) scheduleSync();
   renderTab(app.tab);
 };
-app.isDirty = () => !app.demo && !!app.env && app.env.rev > store.publishedRev();
+app.isDirty = () => {
+  if (app.demo || !app.env) return false;
+  return app.account ? app.env.rev > store.syncedRev(app.account) : app.env.rev > store.publishedRev();
+};
 app.lock = lock;
 app.rerender = () => { app.stale = new Set(Object.keys(VIEWS)); renderTab(app.tab); };
+app.useAccount = useAccount;
+app.showLock = showLock;
 
-function lock(reason = '') {
+// ---------------------------------------------------------------------------
+// Cloud sync (accounts only)
+// ---------------------------------------------------------------------------
+let syncTimer = null;
+let syncing = false;
+function scheduleSync(delay = 1200) { clearTimeout(syncTimer); syncTimer = setTimeout(() => app.syncNow({ quiet: true }), delay); }
+function refreshSyncUI() { app.stale.add('overview'); if (app.tab === 'overview') renderTab('overview'); }
+
+app.syncNow = async function syncNow({ quiet = false } = {}) {
+  const u = app.account;
+  const token = app.vault?.sync?.token;
+  if (!u || !token || app.demo || syncing) return;
+  if (app.env.rev <= store.syncedRev(u)) { if (!quiet) toast('Everything is synced'); return; }
+  syncing = true;
+  try {
+    await cloud.push(u, token, app.env, store.syncedRev(u));
+    store.setSynced(u, app.env.rev);
+    if (!quiet) toast('Synced');
+  } catch (e) {
+    if (e.code === 'conflict') await resolveConflict();
+    else if (e.status === 401) lock('Your passphrase was changed on another device. Unlock with the new one.', { dropCopy: true });
+    else if (!quiet) toast(e.code === 'offline' ? 'You’re offline. Money will sync when you’re back.' : (cloudMessage(e) || 'Couldn’t sync'), { icon: 'warn', color: 'orange' });
+  } finally {
+    syncing = false;
+    if (app.vault) refreshSyncUI();
+  }
+};
+window.addEventListener('online', () => { if (app.vault && app.isDirty()) app.syncNow({ quiet: true }); });
+
+/** After unlocking: fetch the newest copy from the cloud. */
+async function pullLatest() {
+  const u = app.account;
+  const token = app.vault?.sync?.token;
+  if (!u || !token) return;
+  let r;
+  try { r = await cloud.pull(u, token); } catch (e) {
+    if (e.status === 401) lock('Your passphrase was changed on another device. Unlock with the new one.', { dropCopy: true });
+    return;
+  }
+  if (app.account !== u || !app.vault) return;
+  const synced = store.syncedRev(u);
+  const localChanges = app.env.rev > synced;
+  if (r.rev > synced) {
+    if (localChanges) return resolveConflict(r);
+    await adoptRemote(r);
+  } else if (localChanges) {
+    scheduleSync(0);
+  }
+}
+
+async function adoptRemote(r) {
+  const u = app.account;
+  let data;
+  try { data = await crypto.openWithSession(r.envelope, app.session); } catch {
+    // Another device changed the passphrase: keep its copy and ask for the new one.
+    store.saveAccountEnv(u, r.envelope);
+    store.setSynced(u, r.rev);
+    app.env = r.envelope;
+    lock('Your passphrase was changed on another device. Unlock with the new one.');
+    return;
+  }
+  app.vault = data;
+  app.env = r.envelope;
+  store.saveAccountEnv(u, r.envelope);
+  store.setSynced(u, r.rev);
+  rebuild();
+  app.rerender();
+  toast('Updated from your other device', { icon: 'arrows', color: 'blue' });
+}
+
+async function resolveConflict(remote = null) {
+  const u = app.account;
+  const token = app.vault?.sync?.token;
+  try { remote ||= await cloud.pull(u, token); } catch { return; }
+  const choice = await alertSheet({
+    title: 'Changed on two devices',
+    message: 'This device and another one both changed your data since the last sync. Which version should Money keep?',
+    actions: [
+      { label: 'Use the Other Device’s', value: 'remote', style: 'primary' },
+      { label: 'Keep This Device’s', value: 'local' },
+    ],
+  });
+  if (choice === 'remote') return adoptRemote(remote);
+  try {
+    await cloud.push(u, token, app.env, remote.rev, { force: true });
+    store.setSynced(u, app.env.rev);
+    toast('Synced');
+  } catch (e) { toast(cloudMessage(e) || 'Couldn’t sync', { icon: 'warn', color: 'orange' }); }
+  refreshSyncUI();
+}
+
+function lock(reason = '', { dropCopy = false } = {}) {
   if (!app.vault) return;
   app.bioPrompted = true;
   app.session = null;
   app.vault = null;
   app.model = null;
+  clearTimeout(syncTimer);
   for (const id of Object.keys(VIEWS)) document.getElementById(`page-${id}`).innerHTML = '';
   stopAutoLock();
+  if (dropCopy && app.account) { app.env = null; store.dropAccountEnv(app.account); }
   if (app.demo) { app.demo = false; showLock(); return; }
   showLock(reason);
 }
