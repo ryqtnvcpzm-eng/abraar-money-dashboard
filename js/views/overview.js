@@ -92,11 +92,17 @@ export function renderOverview(page) {
   if (cards.length) {
     ins.innerHTML = `<div class="section-head"><h2>Insights</h2></div>
       <div class="insights" id="ins-row" tabindex="0" aria-label="Insights, swipe for more">
-        ${cards.map((c) => `<article class="insight" style="--c:var(--${esc(c.color)})">
-          <div class="kicker">${icon(c.icon)}${esc(c.kicker)}</div><h3>${esc(c.title)}</h3><p>${esc(c.text)}</p></article>`).join('')}
+        ${cards.map((c, i) => `<button type="button" class="insight" data-ins="${i}" style="--c:var(--${esc(c.color)})" aria-label="${esc(`${c.kicker}: ${c.title}. ${c.text}`)}">
+          <span class="kicker">${icon(c.icon)}<span>${esc(c.kicker)}</span>${icon('chev-r', 'chev')}</span><h3>${esc(c.title)}</h3><p>${esc(c.text)}</p></button>`).join('')}
       </div>
       <div class="dots" aria-hidden="true">${cards.map((_, i) => `<i class="${i === 0 ? 'on' : ''}"></i>`).join('')}</div>`;
     const row = ins.querySelector('#ins-row');
+    row.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-ins]');
+      if (!b) return;
+      haptic();
+      (await import('./insight.js')).openInsight(cards[+b.dataset.ins]);
+    });
     const dots = [...ins.querySelectorAll('.dots i')];
     let last = 0;
     row.addEventListener('scroll', () => {

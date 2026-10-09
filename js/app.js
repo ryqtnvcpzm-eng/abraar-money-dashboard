@@ -344,4 +344,8 @@ function registerSW() {
 
 app.icon = icon;
 app.alert = alertSheet;
+// Native apps don't zoom. CSS touch-action: manipulation stops double-tap zoom; iOS ignores
+// user-scalable=no, so pinch is blocked here.
+['gesturestart', 'gesturechange'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
+
 boot();
