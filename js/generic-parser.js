@@ -14,8 +14,12 @@
 import { groupLines } from './cibc-parser.js';
 import {
   scanDate, findDates, resolveOrder, settle, isoDate, validDate, isAmountToken, splitTrailingAmounts,
-  detectDecimal, parseMoney, signed, detectCurrency, hasWord, norm,
+  detectDecimal, parseMoney, signed, detectCurrency, hasWord, norm, ZERO_DECIMAL,
 } from './parse-util.js';
+
+// Per-statement reading settings (set at the start of parseGenericStatement, which is synchronous).
+const ctx = { zero: false, cache: new WeakMap() };
+const money = (raw, decimal) => parseMoney(raw, decimal, { zero: ctx.zero });
 
 const ROLE_WORDS = {
   date: ['date', 'dates', 'datum', 'fecha', 'data', 'transaction date', 'trans date', 'txn date', 'tran date', 'posting date', 'post date', 'posted', 'value date', 'valuta', 'buchungstag', 'buchung', 'wertstellung', 'date operation', 'date de l operation', 'date valeur', 'fecha operacion', 'fecha valor', 'data operazione', 'data valuta', 'data movimento', 'boekdatum', 'day'],
@@ -89,7 +93,14 @@ function headerRoles(line) {
 }
 
 /** Split a line into { date, desc, amounts: [{ raw, center }], descX } using cell positions. */
-function readLine(line, decimal) {
+function readLine(line, decimal, cols = null) {
+  // Lines are read several times (summary scan, table scan); without column info the answer is the same.
+  if (!cols) { const hit = ctx.cache.get(line); if (hit) return hit; }
+  const r = readLineUncached(line, decimal, cols);
+  if (!cols) ctx.cache.set(line, r);
+  return r;
+}
+function readLineUncached(line, decimal, cols) {
   const cells = line.cells.map((c) => ({ ...c }));
   let date = null;
   let date2 = null;
@@ -111,7 +122,9 @@ function readLine(line, decimal) {
     }
     return d;
   };
-  date = takeDate();
+  // A date has to sit in the date column: "24/7 FITNESS" in the description column isn't 24 July.
+  const inDescColumn = cols?.desc && cells[0] && cells[0].x >= cols.desc.left - 4;
+  date = inDescColumn ? null : takeDate();
   // A second date right after the first (transaction date + posting date): keep the first.
   if (date && cells.length && scanDate(cells.map((c) => c.text).join(' '))) date2 = takeDate();
   const amounts = [];
@@ -119,8 +132,8 @@ function readLine(line, decimal) {
   for (const c of cells) {
     const t = c.text.trim();
     if (!t) continue;
-    if (isAmountToken(t)) { amounts.push({ raw: t, center: (c.x + c.right) / 2, right: c.right }); continue; }
-    const s = splitTrailingAmounts(t);
+    if (isAmountToken(t, ctx.zero)) { amounts.push({ raw: t, center: (c.x + c.right) / 2, right: c.right }); continue; }
+    const s = splitTrailingAmounts(t, ctx.zero);
     if (s.amounts.length && s.text) {
       const per = (c.right - c.x) / Math.max(t.length, 1);
       let off = t.length;
@@ -135,32 +148,36 @@ function readLine(line, decimal) {
       amounts.push(...found);
     } else text.push(t);
   }
-  const descX = cells.find((c) => c.text.trim() && !isAmountToken(c.text.trim()))?.x ?? null;
-  return { date, date2, desc: text.join(' ').replace(/\s+/g, ' ').trim(), amounts, descX, x0: line.cells[0]?.x ?? 0, y: line.y };
+  const descX = cells.find((c) => c.text.trim() && !isAmountToken(c.text.trim(), ctx.zero))?.x ?? null;
+  // The whole line came out of the PDF as one piece of text: column positions mean nothing for it.
+  const single = line.cells.length === 1;
+  return { date, date2, desc: text.join(' ').replace(/\s+/g, ' ').trim(), amounts, descX, x0: line.cells[0]?.x ?? 0, y: line.y, single };
 }
 
 /** Assign each amount on a row to a column role using the header positions. */
 function assignColumns(row, cols, decimal) {
   const out = { debit: null, credit: null, amount: null, balance: null };
-  const parsed = row.amounts.map((a) => ({ ...a, m: parseMoney(a.raw, decimal) })).filter((a) => a.m);
-  if (cols && cols.numeric.length) {
+  const parsed = row.amounts.map((a) => ({ ...a, m: money(a.raw, decimal) })).filter((a) => a.m);
+  const byOrder = (list) => {
+    if (list.length >= 2) { out.amount = list[list.length - 2].m; out.balance = list[list.length - 1].m; } else if (list.length === 1) out.amount = list[0].m;
+  };
+  if (cols && cols.numeric.length && !row.single) {
     const minCenter = Math.min(...cols.numeric.map((c) => c.left)) - 45;
     const taken = new Set();
+    const skipped = [];
     for (const a of parsed) {
-      if (a.inline && a.right < minCenter) continue; // e.g. an exchange rate inside the description
-      if (a.center < minCenter && cols.numeric.length > 1) continue;
+      if ((a.inline && a.right < minCenter) || (a.center < minCenter && cols.numeric.length > 1)) { skipped.push(a); continue; } // e.g. an exchange rate inside the description
       const ranked = cols.numeric.map((c) => ({ c, d: Math.min(Math.abs(a.center - c.center), Math.abs(a.right - c.right)) })).sort((x, y) => x.d - y.d);
       const pick = ranked.find((r) => !taken.has(r.c.role));
       if (!pick) continue;
       taken.add(pick.c.role);
       out[pick.c.role] = a.m;
     }
-  } else if (parsed.length >= 2) {
-    out.amount = parsed[parsed.length - 2].m;
-    out.balance = parsed[parsed.length - 1].m;
-  } else if (parsed.length === 1) {
-    out.amount = parsed[0].m;
+    // Nothing landed in a money column, but the description ends in amounts: the bank printed them there.
+    if (!out.debit && !out.credit && !out.amount && skipped.length) byOrder(skipped.filter((a) => a.inline));
+    return out;
   }
+  byOrder(parsed);
   return out;
 }
 
@@ -176,14 +193,16 @@ export function parseGenericStatement(pages, options = {}) {
   const all = pageLines.flatMap((ls, p) => ls.map((l) => ({ ...l, page: p + 1 })));
   const fullText = all.map((l) => l.text).join('\n');
   const warnings = [];
-  const decimal = detectDecimal(all.flatMap((l) => l.cells.map((c) => c.text)).flatMap((t) => [t, ...splitTrailingAmounts(t).amounts]));
   const currency = detectCurrency(fullText);
+  ctx.zero = ZERO_DECIMAL.has(currency);
+  ctx.cache = new WeakMap();
+  const decimal = ctx.zero ? '.' : detectDecimal(all.flatMap((l) => l.cells.map((c) => c.text)).flatMap((t) => [t, ...splitTrailingAmounts(t).amounts]));
   const card = CARD_HINTS.filter((h) => phraseIn(fullText, [h])).length >= 2;
 
   // ---- summary lines: opening/closing balance and totals, anywhere on the statement ----
   const lineAmounts = (l) => {
     const r = readLine(l, decimal);
-    return r.amounts.map((a) => parseMoney(a.raw, decimal)).filter(Boolean);
+    return r.amounts.map((a) => money(a.raw, decimal)).filter(Boolean);
   };
   let opening = null, openingWeak = null, closing = null, closingWeak = null;
   const totals = { withdrawals: null, deposits: null };
@@ -226,7 +245,7 @@ export function parseGenericStatement(pages, options = {}) {
     if (hc) { cols = hc; seenHeader = true; inTable = true; continue; }
     if (FOOTER.test(l.text) || l.y < 28) continue;
     if (seenHeader && !inTable) continue;
-    const r = readLine(l, decimal);
+    const r = readLine(l, decimal, cols);
     if (!r.date && !r.amounts.length && !r.desc) continue;
     if ((phraseIn(r.desc, [...OPENING, ...CLOSING]) || startsWithPhrase(r.desc, [...OPENING_WEAK, ...CLOSING_WEAK])) && r.desc.split(' ').length <= 8) r.special = true;
     if (startsWithPhrase(r.desc, TOTAL)) r.special = true;

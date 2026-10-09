@@ -58,7 +58,13 @@ export function openSheet(opts) {
   const api = {
     el,
     body: el.querySelector('.sheet-body'),
-    setBody(html) { api.body.innerHTML = html; },
+    setBody(html) {
+      // Redrawing a sheet mustn't throw focus to the page (keyboard and VoiceOver users lose their place).
+      const at = document.activeElement;
+      const sel = api.body.contains(at) ? focusKey(at) : null;
+      api.body.innerHTML = html;
+      if (sel) api.body.querySelector(sel)?.focus({ preventScroll: true });
+    },
     setTitle(t) { el.querySelector('.sheet-head h2').textContent = t; },
     close,
   };
@@ -89,7 +95,16 @@ export function openSheet(opts) {
   return api;
 }
 
-export function closeAllSheets() { [...stack].reverse().forEach((s) => s.close()); }
+/** A selector that finds "the same control" after a redraw. */
+function focusKey(el) {
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  for (const a of el.getAttributeNames()) if (a.startsWith('data-')) return `[${a}="${CSS.escape(el.getAttribute(a))}"]`;
+  return null;
+}
+
+const openAlerts = new Set();
+/** Close every sheet and dismiss any alert (as Cancel). Used when the app locks. */
+export function closeAllSheets() { [...stack].reverse().forEach((s) => s.close()); [...openAlerts].forEach((dismiss) => dismiss()); }
 export const topSheet = () => stack[stack.length - 1];
 
 // The app behind the sheet recedes slightly, like iOS card presentation (phones only).
@@ -151,12 +166,15 @@ export function alertSheet({ title, message = '', actions }) {
       ${actions.map((a, i) => `<button class="btn ${a.style === 'cancel' ? 'plain' : a.style === 'destructive' ? 'destructive' : a.style === 'primary' ? '' : 'secondary'}" data-i="${i}">${esc(a.label)}</button>`).join('')}</div>`;
     document.body.append(wrap);
     requestAnimationFrame(() => wrap.classList.add('open'));
-    const done = (v) => { wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 250); resolve(v); };
+    const cancelValue = actions.find((a) => a.style === 'cancel')?.value;
+    const done = (v) => { openAlerts.delete(dismiss); wrap.classList.remove('open'); setTimeout(() => wrap.remove(), 250); resolve(v); };
+    const dismiss = () => done(cancelValue);
+    openAlerts.add(dismiss);
     wrap.addEventListener('click', (e) => {
       const b = e.target.closest('[data-i]');
-      if (b) { haptic(); done(actions[+b.dataset.i].value); } else if (e.target === wrap) done(actions.find((a) => a.style === 'cancel')?.value);
+      if (b) { haptic(); done(actions[+b.dataset.i].value); } else if (e.target === wrap) dismiss();
     });
-    wrap.addEventListener('keydown', (e) => { if (e.key === 'Escape') done(actions.find((a) => a.style === 'cancel')?.value); });
+
     setTimeout(() => wrap.querySelector('.btn')?.focus(), 50);
   });
 }
@@ -208,9 +226,21 @@ export function pageFrame({ title, sub = '', left = '', right = '', body }) {
     </div></div>`;
 }
 
-// Escape closes the top-most sheet wherever focus is (alerts handle their own Escape first).
+// Escape dismisses the top-most alert, else closes the top-most sheet, wherever focus is.
+// Tab stays inside the top-most alert or sheet (it's modal), instead of wandering to the page behind.
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || document.querySelector('.alert-wrap')) return;
+  const modal = [...document.querySelectorAll('.alert-wrap')].pop() || topSheet()?.el;
+  if (e.key === 'Tab' && modal) {
+    const items = [...modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter((x) => !x.disabled && !x.hidden && x.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (!modal.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    return;
+  }
+  if (e.key !== 'Escape') return;
+  if (openAlerts.size) { e.preventDefault(); [...openAlerts].pop()(); return; }
   const top = topSheet();
   if (top) { e.preventDefault(); top.close(); }
 });

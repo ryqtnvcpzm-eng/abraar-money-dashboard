@@ -84,7 +84,7 @@ Accounts let anyone you send the link to make their **own** private account with
 
 Good to know:
 
-- **Forgot your passphrase?** Every account gets a **recovery key** when it's created (also in Settings → Recovery Key). On the lock screen tap **Forgot passphrase?** and enter it, or use **Reset with Face ID** on a device where Face ID is on. Without either, nobody can reset it, including you as the site owner. That's what keeps it private.
+- **Forgot your passphrase?** Every account gets a **recovery key** when it's created (also in Settings → Recovery Key). Changing your passphrase in Settings gives you a new recovery key; the old one stops working. On the lock screen tap **Forgot passphrase?** and enter it, or use **Reset with Face ID** on a device where Face ID is on. Without either, nobody can reset it, including you as the site owner. That's what keeps it private.
 - If two devices change the same account offline, the next sync asks which version to keep.
 - Statements from **any bank** work: PDF statements in most layouts and languages, or the CSV, OFX/QFX or QIF download from online banking (the most reliable choice when a bank offers it). Scanned (image-only) PDFs can't be read.
 - If you turned on Cloudflare Access (below), add each person's email to its policy so they can reach the site.
@@ -157,7 +157,14 @@ Duplicates are skipped automatically, even across a PDF and a CSV of the same mo
 
 - **After adding statements:** places Money doesn't recognise (usually small local spots) are listed under **Needs a Category**, from the import screen or the banner on Overview. One tap per place; it's remembered for every past and future visit.
 - **In the app:** tap any transaction → **Category** → pick one → **Apply to All** to save a merchant rule. Rules are stored in your encrypted vault (Settings → Merchant Rules to delete them), never in the public repo.
-- **How matching works:** first the kind of transaction (fees, pay, transfers, cash withdrawals), then the merchant named first in the description, so "BOUSTAN MCGILL" is a restaurant and "MCGILL ATHLETIC" is fitness. A campus or institution name on its own (McGill, "University") only counts when nothing else matches.
+- **Automatic, for any bank in the world.** Money categorises on your device, in this order:
+  1. the kind of transaction (pay, fees, transfers, cash withdrawals, investing apps), in many languages;
+  2. a merchant category code (MCC) when the bank prints one;
+  3. about 900 chains and brands from around the world (Tesco, Kroger, Carrefour, REWE, Swiggy, Woolworths, Lawson, Talabat…);
+  4. everyday words in many languages ("pharmacie", "supermercado", "Tankstelle", "ristorante");
+  5. your own choices: tagging "Blue Heron" once also covers "Blue Heron Main St" and "Blue Heron Airport".
+
+  The merchant named first in the description wins, so "BOUSTAN MCGILL" is a restaurant, and a place name on its own (McGill, "University") only counts when nothing else matches. Cafés, transit and restaurants paid in a foreign currency count as **Travel**. On a test set of 173 descriptions from 20+ countries it gets every one right, and `npm test` checks that.
 - **In `data/rules.json`:** the built-in categories (name, color, icon, whether it counts as *Everyday*) and merchant patterns (case-insensitive regex). Rules marked `"stage": "type"` are checked first, in order; `"weak": true` rules only apply when no other merchant rule matches. This file is public, so keep it to generic merchant names. Never put people's names or amounts in it.
 
 ## Security notes
@@ -166,7 +173,7 @@ Duplicates are skipped automatically, even across a PDF and a CSV of the same mo
 - Auto-lock: after 5 minutes idle by default (Settings → Auto-Lock), and when the app has been in the background for over a minute.
 - Change your passphrase in Settings → **Change Passphrase**, then Save to GitHub.
 - **Forget This Device** (or **Sign Out on This Device** for an account) removes the local encrypted copy from that browser. **Delete Account** removes an account's data from the server for good.
-- The sync API stores only ciphertext and a SHA-256 hash of a token derived from the passphrase key, so it can't decrypt anything or hand one person's data to another. Wrong-token attempts are throttled per account.
+- The sync API stores only ciphertext and a SHA-256 hash of a token derived from the passphrase key, so it can't decrypt anything or hand one person's data to another. Wrong guesses are throttled per account and per network (10 per 15 minutes), so a stranger guessing can't lock you out. Saves use compare-and-swap, so two devices can't silently overwrite each other; if both changed, Money asks which to keep.
 - Never commit PDFs, CSVs or decrypted exports. `.gitignore` already blocks the common ones.
 
 ## Development

@@ -44,13 +44,15 @@ export function balanceChart(wrap, series, { onScrub, height = 210 } = {}) {
   }
   // month ticks along the bottom, thinned so labels never collide
   let xl = '';
-  let lastX = -999;
+  // Track where the previous label *ends*: the first one is left-aligned, so it reaches ~26px to the right.
+  let lastEnd = -999;
   series.forEach((p, i) => {
     const first = i === 0 || p.date.slice(0, 7) !== series[i - 1].date.slice(0, 7);
     if (!first) return;
     const x = X(i);
-    if (x - lastX < 26 || x > W - pad.r - 10) return;
-    lastX = x;
+    const start = i === 0 ? x : x - 13;
+    if (start - lastEnd < 6 || x > W - pad.r - 10) return;
+    lastEnd = i === 0 ? x + 26 : x + 13;
     xl += `<text class="chart-axis" x="${x}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : 'middle'}">${monthLabel(p.date.slice(0, 7), 'short')}</text>`;
   });
 
@@ -150,6 +152,9 @@ export function stackedColumns(wrap, months, { order, cats, selected, onSelect, 
   g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(0)}" y2="${Y(0)}" style="stroke:var(--label-3)" stroke-width="1" shape-rendering="crispEdges"/>`;
 
   const peak = months.reduce((a, b) => (b.total > a.total ? b : a), months[0]);
+  // Month names need ~26px each: with many months, label every Nth one (and always the selected month).
+  const every = Math.max(1, Math.ceil(26 / band));
+  const showLabel = (i, ym) => ym === selected || (months.length - 1 - i) % every === 0; // counted back from the latest month
   months.forEach((m, i) => {
     const cx = pad.l + band * i + band / 2;
     const x = cx - bw / 2;
@@ -184,7 +189,7 @@ export function stackedColumns(wrap, months, { order, cats, selected, onSelect, 
       <title>${esc(monthLabel(m.ym))}: ${money(m.total / 100)}</title>
       <rect x="${pad.l + band * i}" y="${pad.t - 10}" width="${band}" height="${ih + 32}" fill="transparent"/>
       <g class="stack" style="transform-origin:${cx}px ${Y(0)}px">${segs.join('')}</g>${label}
-      <text class="chart-axis" x="${cx}" y="${H - 6}" text-anchor="middle" style="${selected === m.ym ? 'fill:var(--label);font-weight:600' : ''}">${monthLabel(m.ym, 'short')}</text></g>`;
+      ${showLabel(i, m.ym) ? `<text class="chart-axis" x="${cx}" y="${H - 6}" text-anchor="middle" style="${selected === m.ym ? 'fill:var(--label);font-weight:600' : ''}">${monthLabel(m.ym, every > 1 && m.ym.endsWith('-01') ? 'shortYear' : 'short')}</text>` : ''}</g>`;
   });
   wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Spending by month, stacked by category">${g}</svg>`;
   if (!reducedMotion()) {
@@ -261,7 +266,9 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
     let path = '';
     if (h && b.v > 0) { const y = y0 - h; path = `M${x},${y0}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${y0}Z`; }
     if (h && b.v < 0) { const y = y0 + h; path = `M${x},${y0}V${y - r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y - r}V${y0}Z`; }
-    const showLabel = !thin || i % 2 === 0 || i === def;
+    // Labels need ~26px each: every Nth one, counted back from the latest, plus the highlighted bar.
+    const every = Math.max(thin ? 2 : 1, Math.ceil(26 / band));
+    const showLabel = (bars.length - 1 - i) % every === 0 || i === def;
     return `<g class="cc-bar" data-i="${i}">
       <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 34}" fill="transparent"/>
       ${path ? `<path d="${path}" style="fill:var(--${b.color || color});transition:opacity 180ms"/>` : ''}

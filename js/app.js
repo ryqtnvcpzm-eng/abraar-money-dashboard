@@ -149,8 +149,10 @@ function showAccountLock(message = '') {
           if (!app.cloudOK) throw e; // offline: it really is the wrong passphrase for this copy
         }
       }
-      // No usable copy on this device (e.g. the passphrase changed on another device): fetch it.
+      // No usable copy on this device (e.g. the passphrase changed on another device): fetch it,
+      // keeping aside any edits here that never synced (they're offered after unlocking).
       const r = await cloud.signIn(u, pass);
+      if (env && env.rev > store.syncedRev(u)) store.stashUnsynced(u, env);
       store.saveAccountEnv(u, r.env); store.setSynced(u, r.env.rev);
       app.env = r.env;
       return { session: r.session, data: r.vault };
@@ -257,6 +259,7 @@ function cloudMessage(e) {
     wrong_recovery_key: 'That recovery key doesn’t match this account.',
     bad_recovery_key: 'A recovery key is 24 letters and numbers, like K7QM-2D9X-….',
     conflict: 'Something changed on another device. Try again.',
+    bad_server_kdf: 'The server sent unsafe encryption settings, so Money stopped. Your data is untouched.',
   }[e?.code] || (e?.status ? `Something went wrong (${e.status}). Try again.` : '');
 }
 
@@ -579,7 +582,7 @@ function enter({ session, vault, demo, firstRun = false }) {
   startAutoLock();
   haptic();
   if (firstRun) setTimeout(() => import('./views/importer.js').then((m) => m.openImporter({ welcome: true })), 600);
-  if (app.account && !demo) pullLatest();
+  if (app.account && !demo) pullLatest().then(offerUnsynced);
 }
 
 export function rebuild() {
@@ -591,14 +594,14 @@ export function rebuild() {
 app.commit = async function commit({ silent = false } = {}) {
   rebuild();
   app.stale = new Set(Object.keys(VIEWS));
-  renderTab(app.tab);
-  if (app.demo) { if (!silent) toast('Sample data isn’t saved', { icon: 'sparkle', color: 'indigo' }); return; }
+  if (app.demo) { renderTab(app.tab); if (!silent) toast('Sample data isn’t saved', { icon: 'sparkle', color: 'indigo' }); return; }
+  // Encrypt first, then render once (the screen shows whether it's synced, which depends on the new revision).
   const rev = (app.env?.rev || 0) + 1;
   app.env = await crypto.seal(app.session, app.vault, rev);
   const ok = app.account ? store.saveAccountEnv(app.account, app.env) : store.saveLocal(app.env);
   if (!ok) toast('Couldn’t save on this device — export the file', { icon: 'warn', color: 'orange' });
   if (app.account) scheduleSync();
-  renderTab(app.tab);
+  if (app.vault) renderTab(app.tab);
 };
 app.isDirty = () => {
   if (app.demo || !app.env) return false;
@@ -623,19 +626,56 @@ app.syncNow = async function syncNow({ quiet = false } = {}) {
   if (!u || !token || app.demo || syncing) return;
   if (app.env.rev <= store.syncedRev(u)) { if (!quiet) toast('Everything is synced'); return; }
   syncing = true;
+  const sent = app.env; // a save can land while this upload is in flight: only mark what was actually sent
   try {
-    await cloud.push(u, token, app.env, store.syncedRev(u));
-    store.setSynced(u, app.env.rev);
+    await cloud.push(u, token, sent, store.syncedRev(u));
+    store.setSynced(u, sent.rev);
+    app.syncError = null;
     if (!quiet) toast('Synced');
   } catch (e) {
     if (e.code === 'conflict') await resolveConflict();
-    else if (e.status === 401) lock('Your passphrase was changed on another device. Unlock with the new one.', { dropCopy: true });
-    else if (!quiet) toast(e.code === 'offline' ? 'You’re offline. Money will sync when you’re back.' : (cloudMessage(e) || 'Couldn’t sync'), { icon: 'warn', color: 'orange' });
+    else if (e.status === 401) keyChangedElsewhere();
+    else {
+      if (e.code !== 'offline') app.syncError = cloudMessage(e) || 'Couldn’t sync';
+      if (!quiet) toast(e.code === 'offline' ? 'You’re offline. Money will sync when you’re back.' : app.syncError, { icon: 'warn', color: 'orange' });
+    }
   } finally {
     syncing = false;
-    if (app.vault) refreshSyncUI();
+    if (app.vault) {
+      refreshSyncUI();
+      if (app.account === u && app.env.rev > sent.rev && app.env.rev > store.syncedRev(u)) scheduleSync(300);
+    }
   }
 };
+
+/**
+ * Another device changed the passphrase (our token stopped working). Lock, but never throw away
+ * edits this device hadn't synced: keep them aside and offer them after the next unlock.
+ */
+function keyChangedElsewhere() {
+  const u = app.account;
+  if (u && app.env && app.env.rev > store.syncedRev(u)) store.stashUnsynced(u, app.env);
+  lock('Your passphrase was changed on another device. Unlock with the new one.', { dropCopy: true });
+}
+
+/** After unlocking: if edits were left over from before a passphrase change, let the person keep them. */
+async function offerUnsynced() {
+  const u = app.account;
+  const env = u && store.unsynced(u);
+  if (!env) return;
+  const choice = await alertSheet({
+    title: 'Unsynced changes from before',
+    message: 'This device had changes that weren’t synced when your passphrase was changed on another device. Save them as a file? It opens with your old passphrase.',
+    actions: [{ label: 'Save as File', value: 'save', style: 'primary' }, { label: 'Discard', value: 'discard', style: 'destructive' }, { label: 'Later', value: null, style: 'cancel' }],
+  });
+  if (choice === 'save') {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(env, null, 1)], { type: 'application/json' }));
+    const a = Object.assign(document.createElement('a'), { href: url, download: `money-${u}-unsynced.json` });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    store.clearUnsynced(u);
+  } else if (choice === 'discard') store.clearUnsynced(u);
+}
 window.addEventListener('online', () => { if (app.vault && app.isDirty()) app.syncNow({ quiet: true }); });
 
 /** After unlocking: fetch the newest copy from the cloud. */
@@ -645,7 +685,7 @@ async function pullLatest() {
   if (!u || !token) return;
   let r;
   try { r = await cloud.pull(u, token); } catch (e) {
-    if (e.status === 401) lock('Your passphrase was changed on another device. Unlock with the new one.', { dropCopy: true });
+    if (e.status === 401) keyChangedElsewhere();
     return;
   }
   if (app.account !== u || !app.vault) return;
@@ -689,14 +729,24 @@ async function resolveConflict(remote = null) {
     actions: [
       { label: 'Use the Other Device’s', value: 'remote', style: 'primary' },
       { label: 'Keep This Device’s', value: 'local' },
+      { label: 'Decide Later', value: null, style: 'cancel' },
     ],
   });
+  if (!app.vault || app.account !== u) return; // locked or switched while the question was open
   if (choice === 'remote') return adoptRemote(remote);
+  if (choice !== 'local') { refreshSyncUI(); return; }
+  // Keep ours, but as a newer revision than the server's, so every device moves forward to it.
+  // A normal compare-and-swap against the version we just saw: if yet another save lands first, we ask again.
   try {
-    await cloud.push(u, token, app.env, remote.rev, { force: true });
+    app.env = await crypto.seal(app.session, app.vault, Math.max(app.env.rev, remote.rev) + 1);
+    store.saveAccountEnv(u, app.env);
+    await cloud.push(u, token, app.env, remote.rev);
     store.setSynced(u, app.env.rev);
     toast('Synced');
-  } catch (e) { toast(cloudMessage(e) || 'Couldn’t sync', { icon: 'warn', color: 'orange' }); }
+  } catch (e) {
+    if (e.code === 'conflict') return resolveConflict();
+    toast(cloudMessage(e) || 'Couldn’t sync', { icon: 'warn', color: 'orange' });
+  }
   refreshSyncUI();
 }
 
@@ -709,6 +759,7 @@ function lock(reason = '', { dropCopy = false } = {}) {
   clearTimeout(syncTimer);
   for (const id of Object.keys(VIEWS)) document.getElementById(`page-${id}`).innerHTML = '';
   stopAutoLock();
+  closeAllSheets();
   if (dropCopy && app.account) { app.env = null; store.dropAccountEnv(app.account); }
   if (app.demo) { app.demo = false; showLock(); return; }
   showLock(reason);
