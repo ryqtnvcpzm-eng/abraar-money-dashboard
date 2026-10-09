@@ -155,8 +155,10 @@ Duplicates are skipped automatically, even across a PDF and a CSV of the same mo
 
 ## Categories and rules
 
-- **In the app:** tap any transaction → **Category** → pick one → **Apply to All** to save a merchant rule. Rules are stored in your encrypted vault (Settings → Merchant Rules to delete them).
-- **In `data/rules.json`:** the built-in categories (name, color, icon, whether it counts as *Everyday*) and merchant patterns (case-insensitive regex, first match wins). This file is public, so keep it to generic merchant names. Never put people's names or amounts in it.
+- **After adding statements:** places Money doesn't recognise (usually small local spots) are listed under **Needs a Category**, from the import screen or the banner on Overview. One tap per place; it's remembered for every past and future visit.
+- **In the app:** tap any transaction → **Category** → pick one → **Apply to All** to save a merchant rule. Rules are stored in your encrypted vault (Settings → Merchant Rules to delete them), never in the public repo.
+- **How matching works:** first the kind of transaction (fees, pay, transfers, cash withdrawals), then the merchant named first in the description, so "BOUSTAN MCGILL" is a restaurant and "MCGILL ATHLETIC" is fitness. A campus or institution name on its own (McGill, "University") only counts when nothing else matches.
+- **In `data/rules.json`:** the built-in categories (name, color, icon, whether it counts as *Everyday*) and merchant patterns (case-insensitive regex). Rules marked `"stage": "type"` are checked first, in order; `"weak": true` rules only apply when no other merchant rule matches. This file is public, so keep it to generic merchant names. Never put people's names or amounts in it.
 
 ## Security notes
 

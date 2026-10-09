@@ -28,7 +28,7 @@ export function sanitizeDescription(s) {
 const WORLD_PREFIXES = [
   'CARD PAYMENT TO', 'CARD PAYMENT', 'CARD PURCHASE', 'DEBIT CARD PURCHASE', 'DEBIT CARD', 'POS PURCHASE', 'POS DEBIT', 'POS',
   'CONTACTLESS PAYMENT', 'DIRECT DEBIT', 'STANDING ORDER', 'BANK GIRO CREDIT', 'FASTER PAYMENT', 'BILL PAYMENT TO', 'TRANSFER TO',
-  'ACH DEBIT', 'ACH CREDIT', 'ACH DEPOSIT', 'ACH', 'CHECKCARD', 'PURCHASE AUTHORIZED ON', 'RECURRING PAYMENT',
+  'PAY', 'ACH DEBIT', 'ACH CREDIT', 'ACH DEPOSIT', 'ACH', 'CHECKCARD', 'PURCHASE AUTHORIZED ON', 'RECURRING PAYMENT',
   'UPI', 'NEFT CR', 'NEFT DR', 'NEFT', 'IMPS', 'RTGS',
   'KARTENZAHLUNG', 'LASTSCHRIFT', 'GUTSCHRIFT', 'UBERWEISUNG', 'ÜBERWEISUNG', 'DAUERAUFTRAG',
   'PAIEMENT PAR CARTE', 'PAIEMENT CB', 'PRELEVEMENT', 'PRÉLÈVEMENT', 'VIREMENT', 'CARTE',
@@ -108,8 +108,35 @@ export function cleanName(description) {
 /** Compile rules.json into something fast to apply. */
 export function compileRules(doc) {
   const cats = new Map(doc.categories.map((c) => [c.id, c]));
-  const rules = doc.rules.map((r) => ({ ...r, re: new RegExp(r.pattern, 'i') }));
-  return { cats, categories: doc.categories, rules, planTemplate: doc.planTemplate };
+  const rules = doc.rules.map((r, i) => ({ ...r, i, re: new RegExp(r.pattern, 'i') }));
+  return {
+    cats, categories: doc.categories, rules, planTemplate: doc.planTemplate,
+    typeRules: rules.filter((r) => r.stage === 'type'),
+    merchantRules: rules.filter((r) => r.stage !== 'type' && !r.weak),
+    weakRules: rules.filter((r) => r.weak),
+  };
+}
+
+/**
+ * Which rule describes this transaction?
+ *   1. Rules for the kind of transaction (fees, pay, transfers, cash): first match wins.
+ *   2. Merchant rules: the one matching earliest in the merchant part wins (then the longest match),
+ *      so "BOUSTAN MCGILL" is Boustan, not McGill.
+ *   3. Weak rules (a campus or institution named in passing) only when no merchant rule matched.
+ */
+export function matchRule(desc, compiled) {
+  const typeRule = compiled.typeRules.find((r) => r.re.test(desc));
+  if (typeRule) return typeRule;
+  let body = desc;
+  for (let k = 0; k < 3; k++) { const next = body.replace(PREFIX_RE, ''); if (next === body) break; body = next; }
+  let best = null;
+  for (const r of compiled.merchantRules) {
+    const m = r.re.exec(body) || r.re.exec(desc);
+    if (!m) continue;
+    const at = r.re.test(body) ? m.index : 1000 + m.index;
+    if (!best || at < best.at || (at === best.at && m[0].length > best.len)) best = { r, at, len: m[0].length };
+  }
+  return best?.r || compiled.weakRules.find((r) => r.re.test(desc)) || null;
 }
 
 /**
@@ -118,7 +145,7 @@ export function compileRules(doc) {
  */
 export function categorize(txn, compiled, userRules = []) {
   const desc = txn.merchant || '';
-  const rule = compiled.rules.find((r) => r.re.test(desc));
+  const rule = matchRule(desc, compiled);
   const name = rule?.name || cleanName(desc);
   if (txn.locked && txn.category && compiled.cats.has(txn.category)) return { name: txn.name || name, category: txn.category };
 
