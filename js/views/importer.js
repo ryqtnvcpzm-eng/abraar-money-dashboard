@@ -52,6 +52,10 @@ export function openImporter({ welcome = false } = {}) {
           <div class="name">Added ${plural(done.statements, 'statement')}</div>
           <div class="when">${plural(done.txns, 'transaction')} · encrypted on this device</div>
         </div>
+        ${done.unknown ? `<div class="card" style="margin:6px 0 16px;text-align:center">
+          <div style="font:600 17px/1.3 var(--font)">${plural(done.unknown, 'place')} ${done.unknown === 1 ? 'needs' : 'need'} a category</div>
+          <p class="list-foot" style="margin:4px 0 12px">Money didn’t recognise ${done.unknown === 1 ? 'it' : 'them'}. Pick once and it’s remembered.</p>
+          <button class="btn" data-act="teach">Categorize Now</button></div>` : ''}
         ${app.demo ? '<p class="list-foot" style="text-align:center">Sample mode: nothing is saved.</p>' : app.account ? `
         <p class="list-foot" style="text-align:center;margin-bottom:12px">Syncing to @${esc(app.account)}, so your other devices get it automatically.</p>
         <div class="btn-row"><button class="btn" data-close>Done</button></div>` : `
@@ -174,9 +178,9 @@ export function openImporter({ welcome = false } = {}) {
             <span class="switch"><input type="checkbox" data-opt="mdy" ${meta.dateOrder === 'mdy' ? 'checked' : ''} aria-label="Month comes first"><span></span></span></label>` : ''}
         </div>` : ''}
         <div class="list-head"><span>${plural(p.transactions.length, 'transaction')}</span><span>${statusChip(p.reconciliation.ok)}</span></div>
-        <div class="list">${p.transactions.map((t) => `<div class="row"><span class="main"><span class="title">${esc(t.name || t.merchant)}</span>
-          <span class="subtitle">${esc(dateLabel(t.date, 'medium'))} · ${esc(t.merchant.slice(0, 60))}</span></span>
-          <span class="detail num ${t.amount > 0 ? 'pos' : ''}">${money(t.amount, { sign: true })}</span></div>`).join('')}</div>
+        <div class="list">${p.transactions.map((t) => { const c = app.rules.cats.get(t.category); return `<div class="row with-icon">${c ? `<span class="cat-icon sm" style="--c:var(--${esc(c.color)})">${icon(c.icon)}</span>` : ''}<span class="main"><span class="title">${esc(t.name || t.merchant)}</span>
+          <span class="subtitle">${esc(dateLabel(t.date, 'medium'))} · ${t.category === 'other' && t.amount < 0 ? 'Needs a category' : esc(c?.name || 'Other')}</span></span>
+          <span class="detail num ${t.amount > 0 ? 'pos' : ''}">${money(t.amount, { sign: true })}</span></div>`; }).join('')}</div>
         <p class="list-foot">${signsProven ? 'Money in and out is confirmed by the running balance.' : 'Money in shows in green with a +.'} Nothing is saved until you tap Add.</p>`);
     };
     render();
@@ -220,10 +224,11 @@ export function openImporter({ welcome = false } = {}) {
         n += prep.transactions.length;
       }
       await app.commit({ silent: true });
-      done = { statements: chosen.length, txns: n };
+      done = { statements: chosen.length, txns: n, unknown: (await import('./teach.js')).uncategorized().length };
       draw();
       toast(`Added ${plural(chosen.length, 'statement')}`);
     }
+    if (act === 'teach') { (await import('./teach.js')).openTeach({ onDone: () => { done.unknown = 0; draw(); } }); }
     if (act === 'push') { const s = await import('./settings.js'); await s.saveToRepo(); sheet.close(); }
     if (act === 'export') { const s = await import('./settings.js'); await s.exportVault(); }
   });

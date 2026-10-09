@@ -552,3 +552,15 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
 .recovery-actions .btn { flex: 1; min-width: 0; padding-left: 8px; padding-right: 8px; }
 .field.mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; letter-spacing: 0.04em; text-transform: uppercase; }
 .field.mono::placeholder { text-transform: none; letter-spacing: 0; font-family: var(--font); }
+
+/* Needs a category */
+.teach-card { background: var(--bg-2); border-radius: 16px; padding: 14px 0 12px; margin-bottom: 12px; transition: opacity .2s, transform .2s; }
+.teach-card.done { opacity: 0; transform: scale(.97); }
+.teach-head { padding: 0 16px 10px; }
+.teach-head .title { display: block; font: 600 17px/1.25 var(--font); }
+.teach-head .subtitle { display: block; margin-top: 2px; font: 400 14px/1.3 var(--font); color: var(--label-2); }
+.teach-chips { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 2px; }
+.teach-chip { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 34px; padding: 0 11px; border: 0; border-radius: 17px; background: color-mix(in srgb, var(--c, var(--gray)) 14%, transparent); color: var(--label); font: 500 14px/1 var(--font); cursor: pointer; }
+.teach-chip .icon { width: 16px; height: 16px; color: var(--c, var(--gray)); }
+.teach-chip.plain { background: var(--fill-3); color: var(--label-2); }
+.teach-chip:active { transform: scale(.96); }

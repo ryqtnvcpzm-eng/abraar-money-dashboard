@@ -61,6 +61,17 @@ await test('rules categorize common merchants', () => {
   assert.equal(c('DEPOSIT TPS/GST', 120), 'transfer_in');
   assert.equal(c('VISA DEBIT RETAIL PURCHASE AIR CAN*'), 'travel');
   assert.equal(c('VISA DEBIT RETAIL PURCHASE IC* INSTACART'), 'groceries');
+  // The merchant named first beats a place mentioned after it; a campus name alone is a weak hint.
+  assert.equal(c('RETAIL PURCHASE BOUSTAN MCGILL'), 'dining');
+  assert.equal(c('RETAIL PURCHASE MCGILL ATHLETIC'), 'fitness');
+  assert.equal(c('INTERNET BILL PAY MCGILL UNIVERSITY'), 'education');
+  assert.equal(c('RETAIL PURCHASE COLLEGE PIZZA'), 'dining');
+  // The kind of transaction wins: pay is income, an e-transfer to someone named McGill is a transfer.
+  assert.equal(c('PAY MCGILL UNIVERSI', 1800), 'income');
+  assert.equal(c('E-TRANSFER Sample Mcgill'), 'transfers');
+  assert.equal(c('SERVICE CHARGE DISCOUNT', 6.95), 'fees');
+  assert.equal(c('VISA DEBIT PURCHASE UBER *EATS PENDING'), 'dining');
+  assert.equal(c('CARD PAYMENT TO JOE S KITCHEN'), 'dining');
 });
 await test('user rules beat rules.json, and locked choices beat both', () => {
   const t = { merchant: 'RETAIL PURCHASE COUCHE-TARD #2', amount: -3 };

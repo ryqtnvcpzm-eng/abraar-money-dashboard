@@ -2,6 +2,7 @@
 import { app } from '../state.js';
 import { money, dateLabel, esc, fromCents, addDays, plural, monthLabel } from '../format.js';
 import { dailyBalance, flow, insights, currentBalance } from '../ledger.js';
+import { uncategorized } from './teach.js';
 import { icon, pageFrame, wireLargeTitle, haptic } from '../ui.js';
 import { balanceChart } from '../charts.js';
 
@@ -124,6 +125,10 @@ function banners() {
       ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('arrows')}</span><span class="txt"><b>Not synced yet</b><span>Saved on this device. Syncs automatically when you’re online.</span></span><button class="btn small" data-act="save">Sync</button></div>`
       : `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('upload')}</span><span class="txt"><b>Changes not in your repo yet</b><span>Saved on this device. Save to GitHub to sync.</span></span><button class="btn small" data-act="save">Save</button></div>`;
   }
+  const unknown = app.demo ? [] : uncategorized(app.model);
+  if (unknown.length) {
+    out += `<button class="banner" style="--c:var(--blue);width:100%;text-align:left" data-act="teach"><span class="ic">${icon('tag')}</span><span class="txt"><b>${unknown.length === 1 ? `“${esc(unknown[0].name)}” needs a category` : `${unknown.length} places need a category`}</b><span>One tap each. Money remembers from then on.</span></span>${icon('chev-r', 'chev')}</button>`;
+  }
   const bad = app.model.statements.filter((s) => s.reconciled === false);
   if (bad.length) {
     out += `<button class="banner" style="--c:var(--red);width:100%;text-align:left" data-act="statements"><span class="ic">${icon('warn')}</span><span class="txt"><b>${bad.length === 1 ? `${monthLabel(bad[0].id)} doesn’t reconcile` : `${bad.length} statements don’t reconcile`}</b><span>Tap to see what’s off.</span></span>${icon('chev-r', 'chev')}</button>`;
@@ -162,6 +167,7 @@ function wire(page) {
     if (act === 'add') (await import('./importer.js')).openImporter();
     if (act === 'settings') (await import('./settings.js')).openSettings();
     if (act === 'statements') (await import('./settings.js')).openStatements();
+    if (act === 'teach') (await import('./teach.js')).openTeach();
     if (act === 'save') (await import('./settings.js')).saveToRepo();
     if (act === 'exit-demo') app.lock();
   };
