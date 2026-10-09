@@ -5,7 +5,7 @@ import { cpSync, rmSync, mkdirSync, existsSync, readdirSync, statSync } from 'no
 import { join } from 'node:path';
 
 const OUT = 'dist';
-const FILES = ['index.html', 'manifest.webmanifest', 'sw.js', '_headers'];
+const FILES = ['index.html', 'bank-done.html', 'manifest.webmanifest', 'sw.js', '_headers'];
 const DIRS = ['css', 'js', 'data', 'icons', 'vendor'];
 const BLOCK = /\.(pdf|csv|tsv|xlsx|ofx|qfx|qif|zip)$|\.(plain|decrypted)\.json$/i;
 

@@ -15,12 +15,22 @@
 //   GET    /api/v1/accounts/:user/recovery     -> { recovery }  (fake but stable when there's none)
 //   PUT    /api/v1/accounts/:user/recovery     Bearer token { recovery | null } -> 204
 //   DELETE /api/v1/accounts/:user              Bearer token -> 204
+//   POST   /api/v1/accounts/:user/bank/link    Bearer token { accessToken? } -> { linkToken, url }
+//   POST   /api/v1/accounts/:user/bank/finish  Bearer token { linkToken } -> { status, accessToken?, institution?, accounts? }
+//   POST   /api/v1/accounts/:user/bank/sync    Bearer token { accessToken, cursor, accountId } -> { added, modified, removed, cursor, accounts }
+//   POST   /api/v1/accounts/:user/bank/remove  Bearer token { accessToken } -> 204
+//
+// Bank sync (optional, Plaid): the browser keeps the Plaid access token inside its encrypted vault and
+// sends it with each sync. The Worker adds the Plaid secret, relays the call and keeps nothing:
+// transactions pass through in memory only. Account numbers (even Plaid's last-4 "mask") are dropped.
 //
 // Recovery: the browser can wrap the vault key with a random recovery key the owner saves
 // (AES-GCM, key from HKDF of the recovery key). The server only stores that wrapped blob, which is
 // useless without the recovery key, so it can hand it to anyone who asks.
 //
 // Bindings: DB (D1). Secret: INVITE_CODE (needed to create accounts).
+// Optional, for bank sync: PLAID_CLIENT_ID, PLAID_SECRET (secret), PLAID_ENV ("production" or "sandbox"),
+// PLAID_COUNTRIES (default "CA,US").
 
 const HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -139,10 +149,121 @@ async function authorize(req, db, username) {
   return { error: err(401, 'unauthorized') };
 }
 
+// ---------------------------------------------------------------------------
+// Bank sync through Plaid
+// ---------------------------------------------------------------------------
+const bankOn = (env) => !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET);
+const plaidBase = (env) => (/^(https:\/\/|http:\/\/localhost[:/])/.test(env.PLAID_BASE || '') ? env.PLAID_BASE.replace(/\/+$/, '')
+  : `https://${env.PLAID_ENV === 'sandbox' ? 'sandbox' : 'production'}.plaid.com`);
+const ACCESS_RE = /^access-[a-z]+-[0-9a-f-]{20,60}$/;
+const LINK_RE = /^link-[a-z]+-[0-9a-f-]{20,60}$/;
+
+async function plaid(env, path, payload) {
+  let res, data;
+  try {
+    res = await fetch(`${plaidBase(env)}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Plaid-Version': '2020-09-14' },
+      body: JSON.stringify({ client_id: env.PLAID_CLIENT_ID, secret: env.PLAID_SECRET, ...payload }),
+    });
+    data = await res.json();
+  } catch {
+    throw Object.assign(new Error('bank_unreachable'), { status: 502 });
+  }
+  if (!res.ok || data?.error_code) {
+    // Plaid's message for people (never the request or our secret).
+    throw Object.assign(new Error('bank_error'), { status: 502, extra: { plaid: data?.error_code || 'UNKNOWN', detail: data?.display_message || data?.error_message || '' } });
+  }
+  return data;
+}
+
+const slimAccount = (a) => ({
+  id: a.account_id || a.id, name: a.official_name || a.name || 'Account', type: a.type, subtype: a.subtype,
+  current: a.balances?.current ?? null, available: a.balances?.available ?? null, currency: a.balances?.iso_currency_code || null,
+});
+const slimTxn = (t) => ({
+  id: t.transaction_id, account: t.account_id, date: t.date, amount: t.amount, currency: t.iso_currency_code || t.unofficial_currency_code || null,
+  name: t.name || '', merchant: t.merchant_name || '', original: t.original_description || '', pending: !!t.pending,
+  pfc: t.personal_finance_category?.detailed || t.personal_finance_category?.primary || '',
+});
+
+async function bankRoute(action, req, env, url, username) {
+  if (!bankOn(env)) return err(503, 'bank_not_configured');
+  const b = await body(req);
+  if (action === 'link') {
+    // New connection, or "update mode" when the bank needs you to sign in again.
+    const update = typeof b.accessToken === 'string' && ACCESS_RE.test(b.accessToken);
+    const user = [...await hmac(env, 'plaid-user', username)].slice(0, 16).map((x) => x.toString(16).padStart(2, '0')).join('');
+    const r = await plaid(env, '/link/token/create', {
+      client_name: 'Money', language: 'en',
+      country_codes: String(env.PLAID_COUNTRIES || 'CA,US').split(',').map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c)),
+      user: { client_user_id: user },
+      ...(update ? { access_token: b.accessToken } : { products: ['transactions'], transactions: { days_requested: 730 } }),
+      hosted_link: { completion_redirect_uri: `${url.origin}/bank-done.html`, url_lifetime_seconds: 1800 },
+    });
+    if (!r.hosted_link_url) return err(502, 'bank_error', { plaid: 'NO_HOSTED_LINK', detail: 'Plaid didn’t return a Hosted Link URL.' });
+    return json({ linkToken: r.link_token, url: r.hosted_link_url });
+  }
+  if (action === 'finish') {
+    if (typeof b.linkToken !== 'string' || !LINK_RE.test(b.linkToken)) return err(400, 'bad_request');
+    const r = await plaid(env, '/link/token/get', { link_token: b.linkToken });
+    const sessions = r.link_sessions || [];
+    let publicToken = null, institution = null, finished = false;
+    for (const s of sessions) {
+      const add = s.results?.item_add_results?.[0];
+      const pt = add?.public_token || s.on_success?.public_token;
+      if (pt) { publicToken = pt; institution = add?.institution?.name || s.on_success?.metadata?.institution?.name || null; }
+      if (s.on_success) finished = true;
+      if (s.exit || s.on_exit) finished ||= 'exit';
+    }
+    if (b.update) return json({ status: publicToken || finished === true ? 'done' : finished ? 'exited' : 'pending' });
+    if (!publicToken) return json({ status: finished === 'exit' ? 'exited' : 'pending' });
+    const ex = await plaid(env, '/item/public_token/exchange', { public_token: publicToken });
+    const acc = await plaid(env, '/accounts/get', { access_token: ex.access_token });
+    return json({ status: 'done', accessToken: ex.access_token, institution: institution || acc.item?.institution_name || null, accounts: (acc.accounts || []).map(slimAccount) });
+  }
+  if (action === 'sync') {
+    if (typeof b.accessToken !== 'string' || !ACCESS_RE.test(b.accessToken)) return err(400, 'bad_request');
+    const start = typeof b.cursor === 'string' && b.cursor.length < 2000 ? b.cursor : '';
+    const want = typeof b.accountId === 'string' ? b.accountId : null;
+    const keep = (t) => !want || t.account_id === want;
+    // Page through everything since the cursor; if the data changes mid-way, start again from it.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let cursor = start, status = null;
+      const out = { added: [], modified: [], removed: [], accounts: [] };
+      try {
+        for (let page = 0; page < 40; page++) {
+          const r = await plaid(env, '/transactions/sync', { access_token: b.accessToken, cursor: cursor || undefined, count: 500, options: { include_original_description: true } });
+          out.added.push(...r.added.filter(keep).map(slimTxn));
+          out.modified.push(...r.modified.filter(keep).map(slimTxn));
+          out.removed.push(...r.removed.filter(keep).map((x) => x.transaction_id));
+          out.accounts = (r.accounts || []).map(slimAccount);
+          status = r.transactions_update_status || null;
+          // An empty cursor means Plaid hasn't pulled the history yet: keep the one we had.
+          if (r.next_cursor) cursor = r.next_cursor;
+          if (!r.has_more) break;
+        }
+      } catch (e) {
+        if (e.extra?.plaid === 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION') continue;
+        throw e;
+      }
+      if (!out.accounts.length) out.accounts = ((await plaid(env, '/accounts/get', { access_token: b.accessToken })).accounts || []).map(slimAccount);
+      return json({ ...out, cursor, status });
+    }
+    return err(502, 'bank_error', { plaid: 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION', detail: 'Your bank was updating. Try again in a minute.' });
+  }
+  if (action === 'remove') {
+    if (typeof b.accessToken !== 'string' || !ACCESS_RE.test(b.accessToken)) return err(400, 'bad_request');
+    await plaid(env, '/item/remove', { access_token: b.accessToken });
+    return json(null, 204);
+  }
+  return err(404, 'not_found');
+}
+
 export async function handleApi(req, env, url) {
   const db = env.DB;
   const path = url.pathname.replace(/\/+$/, '');
-  if (path === '/api/v1/status' && req.method === 'GET') return json({ configured: !!(db && env.INVITE_CODE) });
+  if (path === '/api/v1/status' && req.method === 'GET') return json({ configured: !!(db && env.INVITE_CODE), bank: !!(db && env.INVITE_CODE) && bankOn(env) });
   if (!db || !env.INVITE_CODE) return err(503, 'not_configured');
   await ensureSchema(db);
 
@@ -168,7 +289,7 @@ export async function handleApi(req, env, url) {
     return json({ username, rev: b.envelope.rev }, 201);
   }
 
-  const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery)?$/.exec(path);
+  const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery|\/bank\/(?:link|finish|sync|remove))?$/.exec(path);
   if (!m) return err(404, 'not_found');
   let username;
   try { username = decodeURIComponent(m[1]).toLowerCase(); } catch { return err(400, 'bad_username'); }
@@ -189,6 +310,7 @@ export async function handleApi(req, env, url) {
   const row = auth.row;
 
   if (sub === '/vault' && req.method === 'GET') return json({ envelope: JSON.parse(row.envelope), rev: row.rev });
+  if (sub.startsWith('/bank/') && req.method === 'POST') return bankRoute(sub.slice(6), req, env, url, username);
 
   if (sub === '/vault' && req.method === 'PUT') {
     const b = await body(req);
@@ -250,7 +372,7 @@ export default {
     try {
       return await handleApi(req, env, url);
     } catch (e) {
-      return err(e.status || 500, e.status ? e.message : 'server_error');
+      return err(e.status || 500, e.status ? e.message : 'server_error', e.extra || {});
     }
   },
 };

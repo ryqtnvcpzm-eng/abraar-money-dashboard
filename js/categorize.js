@@ -344,11 +344,38 @@ export function categorize(txn, compiled, userRules = [], home = 'CAD') {
     const fx = FOREIGN_RE.exec(desc);
     if (fx && home && fx[1] !== home && TRAVEL_WHEN_ABROAD.has(category) && compiled.cats.has('travel')) category = 'travel';
   } else {
-    category = txn.amount > 0 ? 'transfer_in' : 'other';
+    // Nothing matched: the category the bank feed gave (Plaid's), else the default.
+    category = hintCategory(txn.hint, txn.amount) || (txn.amount > 0 ? 'transfer_in' : 'other');
   }
   if (!compiled.cats.has(category)) category = txn.amount > 0 ? 'transfer_in' : 'other';
   // Money in that matched a spending merchant is a refund and reduces that category.
   return { name, category };
+}
+
+// Plaid's personal finance categories (PFC, detailed or primary) → ours. First match wins.
+const PFC = [
+  [/^INCOME_(INTEREST|DIVIDENDS)/, 'interest'], [/^INCOME/, 'income'],
+  [/^TRANSFER_IN_(ACCOUNT_TRANSFER|SAVINGS|INVESTMENT)/, 'own'], [/^TRANSFER_IN/, 'transfer_in'],
+  [/^TRANSFER_OUT_(ACCOUNT_TRANSFER|SAVINGS|INVESTMENT)/, 'own'], [/^TRANSFER_OUT/, 'transfers'],
+  [/^LOAN_PAYMENTS_CREDIT_CARD/, 'own'], [/^LOAN_PAYMENTS/, 'bills'],
+  [/^BANK_FEES/, 'fees'],
+  [/^ENTERTAINMENT/, 'entertainment'],
+  [/^FOOD_AND_DRINK_GROCERIES/, 'groceries'], [/^FOOD_AND_DRINK_(COFFEE|VENDING)/, 'coffee'], [/^FOOD_AND_DRINK/, 'dining'],
+  [/^GENERAL_MERCHANDISE_ELECTRONICS/, 'electronics'], [/^GENERAL_MERCHANDISE_PET/, 'household'], [/^GENERAL_MERCHANDISE/, 'shopping'],
+  [/^HOME_IMPROVEMENT/, 'household'],
+  [/^PERSONAL_CARE_GYMS/, 'fitness'], [/^(MEDICAL|PERSONAL_CARE)/, 'health'],
+  [/^GENERAL_SERVICES_EDUCATION/, 'education'], [/^GENERAL_SERVICES_(INSURANCE|TELE)/, 'bills'],
+  [/^GOVERNMENT_AND_NON_PROFIT/, 'government'],
+  [/^TRANSPORTATION/, 'transport'], [/^TRAVEL/, 'travel'],
+  [/^RENT_AND_UTILITIES_RENT/, 'housing'], [/^RENT_AND_UTILITIES_INTERNET/, 'internet'], [/^RENT_AND_UTILITIES/, 'bills'],
+];
+const MONEY_IN = new Set(['income', 'interest', 'transfer_in']);
+/** Our category for a bank-feed category, or null. Money out never becomes income; money in can be a refund. */
+export function hintCategory(hint, amount = -1) {
+  if (!hint) return null;
+  const hit = PFC.find(([re]) => re.test(String(hint).toUpperCase()))?.[1] || null;
+  if (!hit || (amount < 0 && MONEY_IN.has(hit))) return null;
+  return hit;
 }
 
 /** Rule key for "apply to all from this merchant": same clean name, same direction of money. */

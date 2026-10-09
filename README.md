@@ -6,7 +6,7 @@ A private, Apple-style finance app for your iPhone home screen. It's a static si
 - **Spending**: by month, Everyday vs Everything, categories, monthly stacked chart, top merchants
 - **Activity**: every transaction, searchable. Re-categorize one, apply the change to all from a merchant (saved as a rule), or split one charge across categories.
 - **Plan**: budget from your start date, with Saved / Spent / Eating-out rings and budget vs actual
-- **Add Statement**: reads statements from any bank on your device (PDF, or the CSV, OFX/QFX or QIF file online banking lets you download), removes duplicates, categorizes, and reconciles to the bank's balances
+- **Add Statement**: reads statements from any bank on your device (PDF, or the CSV, OFX/QFX or QIF file online banking lets you download), removes duplicates, categorizes, and reconciles to the bank's balances. Or connect your bank once (Plaid) and new transactions come in on their own; Amazon order history sorts Amazon charges by item
 - **Accounts**: share the link with family. Everyone gets their own private account with every feature, synced across their iPhone and Mac.
 
 **Privacy:** each account's data is one encrypted vault. The sync server (and the repo, for the original single-user vault `data/vault.enc.json`) only ever holds ciphertext: AES-256-GCM, with a key derived from the owner's passphrase (PBKDF2-SHA-256, 600k iterations). Statement PDFs never leave your device and are git-ignored. Account and transit numbers are never stored. The app auto-locks and asks search engines not to index it. See [docs/DESIGN.md](docs/DESIGN.md) for the design and the security model.
@@ -87,8 +87,22 @@ Good to know:
 - **Forgot your passphrase?** Every account gets a **recovery key** when it's created (also in Settings → Recovery Key). Changing your passphrase in Settings gives you a new recovery key; the old one stops working. On the lock screen tap **Forgot passphrase?** and enter it, or use **Reset with Face ID** on a device where Face ID is on. Without either, nobody can reset it, including you as the site owner. That's what keeps it private.
 - If two devices change the same account offline, the next sync asks which version to keep.
 - Statements from **any bank** work: PDF statements in most layouts and languages, or the CSV, OFX/QFX or QIF download from online banking (the most reliable choice when a bank offers it). Scanned (image-only) PDFs can't be read.
-- If you turned on Cloudflare Access (below), add each person's email to its policy so they can reach the site.
+- If you turned on Cloudflare Access (below), add each person's email to its policy so they can reach the site. Leave `/bank-done.html` reachable without it if you use bank sync (it's a static "All done" page with nothing private on it).
 - To stop new sign-ups, change or delete `INVITE_CODE`. Existing accounts keep working while it's set; deleting it pauses sync for everyone until it's set again.
+
+### 2c. Optional: bank sync, so you never download statements again
+
+With accounts on, Money can pull new transactions straight from your bank through [Plaid](https://plaid.com) (it covers CIBC and most banks in Canada and the US). Each account connects its own bank; it's off until you add Plaid keys.
+
+1. Sign up at **dashboard.plaid.com**. New teams in Canada and the US get the free **Trial** plan, which connects real banks (up to 10 connections), enough for a family.
+2. In the Plaid dashboard, under **Developers → Keys**, copy the **client_id** and the **Production secret**.
+3. Still in Plaid, under **Developers → API → Allowed redirect URIs**, add `https://<your site>/bank-done.html`.
+4. In Cloudflare, open your Worker → **Settings → Variables and Secrets** and add `PLAID_CLIENT_ID` (text) and `PLAID_SECRET` (**Secret**). Optional: `PLAID_ENV` = `sandbox` to try it with Plaid's test bank first (use the Sandbox secret then), and `PLAID_COUNTRIES` (default `CA,US`).
+5. Check `https://<your site>/api/v1/status` says `"bank":true`, then in Money tap **+ → Connect Your Bank** (or Settings → Bank Sync).
+
+How it works: you sign in to your bank on **Plaid's own page** (Money never sees your bank password), pick the account this vault follows, and Money brings in the transactions after your last statement file, already categorized (Plaid's category fills in when Money doesn't know a place). After that it syncs on its own whenever you open the app (every few hours), or tap **Sync Now**. Statement files stay the record: if you add one later, it replaces the synced days it covers. The Plaid connection key lives only inside your encrypted vault; the Worker adds Plaid's secret, passes the transactions through and stores nothing. If your bank asks you to sign in again, Bank Sync shows **Reconnect**.
+
+**Why not an Amazon API?** Amazon has no API for your own orders (its APIs are for sellers and affiliates), and the unofficial tools log in as you with your Amazon password and scrape the website, which breaks often and is against Amazon's terms. Money uses the official route instead: **Amazon Orders** opens Amazon's data-request page for your store in one tap, and the zip it emails you sorts every order (see below).
 
 ### 3. Create your vault and set your passphrase
 
@@ -204,7 +218,8 @@ A statement only says "Amazon", but one order can be groceries and the next a ph
 - Change your passphrase in Settings → **Change Passphrase**, then Save to GitHub.
 - **Forget This Device** (or **Sign Out on This Device** for an account) removes the local encrypted copy from that browser. **Delete Account** removes an account's data from the server for good.
 - The sync API stores only ciphertext and a SHA-256 hash of a token derived from the passphrase key, so it can't decrypt anything or hand one person's data to another. Wrong guesses are throttled per account and per network (10 per 15 minutes), so a stranger guessing can't lock you out. Saves use compare-and-swap, so two devices can't silently overwrite each other; if both changed, Money asks which to keep.
-- Never commit PDFs, CSVs or decrypted exports. `.gitignore` already blocks the common ones.
+- **Bank sync** (optional) goes through Plaid: the Plaid access token is stored only inside your encrypted vault and sent to the Worker with each sync; the Worker adds Plaid's secret, relays the call, and keeps nothing (no database rows, no logs of transactions). Account numbers, even Plaid's last-4 "mask", are dropped before anything reaches your browser. Disconnect removes the connection at Plaid.
+- Never commit PDFs, CSVs, Amazon zips or decrypted exports. `.gitignore` already blocks the common ones.
 
 ## Development
 

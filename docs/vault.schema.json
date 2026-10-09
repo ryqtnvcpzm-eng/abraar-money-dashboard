@@ -32,7 +32,9 @@
           "reconciled": { "type": "boolean", "description": "opening + deposits − withdrawals = closing, and both totals match the bank's summary to the cent" },
           "checks": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "statement": { "type": ["number", "null"] }, "computed": { "type": "number" }, "ok": { "type": ["boolean", "null"] } } } },
           "issues": { "type": "array", "items": { "type": "string" } },
-          "importedAt": { "type": "string", "format": "date-time" }
+          "importedAt": { "type": "string", "format": "date-time" },
+          "source": { "type": "string", "description": "cibc, pdf, csv, ofx, qif, or sync (made from bank sync, balances worked back from the bank's balance)" },
+          "fileEnd": { "type": "string", "format": "date", "description": "Where a statement file stopped, when bank sync carried the month on" }
         }
       }
     },
@@ -52,6 +54,8 @@
           "balance": { "type": "number", "description": "Running balance printed beside it, when CIBC prints one" },
           "locked": { "type": "boolean", "description": "Category chosen by hand for this one transaction" },
           "oneOff": { "type": "boolean", "description": "Excluded from Everyday spending" },
+          "ext": { "type": "string", "description": "Bank sync only: the feed's transaction id, to apply its corrections and removals" },
+          "hint": { "type": "string", "description": "Bank sync only: the feed's category (Plaid personal finance category), used when no rule knows the place", "examples": ["FOOD_AND_DRINK_COFFEE"] },
           "parts": { "type": "array", "description": "Split by hand: the charge counted in several categories. Amounts are signed like the charge and add up to it.", "items": { "type": "object", "required": ["category", "amount"], "properties": { "category": { "type": "string" }, "amount": { "type": "number" } } } },
           "items": { "type": "array", "description": "What an Amazon charge bought, from the order history. Items in different categories split the charge (tax and shipping spread over them).", "items": { "type": "object", "required": ["title", "amount", "category"], "properties": { "title": { "type": "string", "maxLength": 90 }, "amount": { "type": "number", "description": "Positive dollars, what the item cost including its tax" }, "category": { "type": "string" }, "qty": { "type": "integer" }, "set": { "type": "boolean", "description": "Category chosen by hand" } } } }
         }
@@ -77,6 +81,16 @@
       "type": "array",
       "description": "Amazon shipments read from the order history that no statement has matched yet (the latest year, at most 1,500), so a statement added later can still be sorted. No order numbers, addresses, payment or tracking details.",
       "items": { "type": "object", "properties": { "date": { "type": "string", "format": "date" }, "ship": { "type": "string", "format": "date" }, "cents": { "type": "integer" }, "ref": { "type": "string", "description": "Links shipments of one order; not Amazon's order number" }, "items": { "type": "array" } } }
+    },
+    "bank": {
+      "type": "object",
+      "description": "Bank sync connection (optional). The access token only works together with the site's Plaid secret.",
+      "properties": {
+        "institution": { "type": "string" }, "accountName": { "type": "string" }, "accountId": { "type": "string", "description": "Plaid's opaque account id (not an account number)" },
+        "type": { "enum": ["depository", "credit"] }, "accessToken": { "type": "string" }, "cursor": { "type": "string" },
+        "balance": { "type": ["number", "null"] }, "balanceDate": { "type": "string", "format": "date" }, "lastSync": { "type": "string", "format": "date-time" },
+        "problem": { "type": ["string", "null"], "description": "\"login\" when the bank needs you to sign in again" }
+      }
     },
     "dismissed": { "type": "array", "items": { "type": "string" }, "description": "Possible double charges you said were both real" },
     "settings": { "type": "object", "properties": { "autoLockMinutes": { "type": "integer" } } }

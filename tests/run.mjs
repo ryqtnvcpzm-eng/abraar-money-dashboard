@@ -8,7 +8,8 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { pdfToPages } from '../js/pdf-text.js';
 import { parseCibcStatement, reconcile, parseSummary } from '../js/cibc-parser.js';
-import { compileRules, cleanName, sanitizeDescription, categorize, productCategory, isMixedStore } from '../js/categorize.js';
+import { compileRules, cleanName, sanitizeDescription, categorize, productCategory, isMixedStore, hintCategory } from '../js/categorize.js';
+import { applyBankSync, lastFileDay } from '../js/bank.js';
 import { emptyVault, prepareImport, commitImport, buildModel, flow, spendByCategory, dailyBalance, planFromTemplate, planTargets, insights, splitParts } from '../js/ledger.js';
 import { recurring, upcoming, duplicates, pace, unusual, cashflow } from '../js/analysis.js';
 import { readOrderFiles, applyOrders, matchWaiting, _test as _amz } from '../js/amazon.js';
@@ -463,6 +464,96 @@ await test('the sample data shows every new kind of insight', async () => {
   const { demoVault } = await import('../js/demo.js');
   const ids = insights(buildModel(demoVault(), compiled), '2026-10-09').map((c) => c.id);
   for (const id of ['duplicate', 'pace', 'pricehike', 'upcoming', 'unusual', 'recurring', 'amazon']) assert.ok(ids.includes(id), id);
+});
+
+console.log('Bank sync');
+const feed = (id, date, amount, name, extra = {}) => ({ id, account: extra.account || 'acc-chq', date, amount, currency: 'CAD', name, merchant: extra.merchant || '', original: extra.original ?? name.toUpperCase(), pending: !!extra.pending, pfc: extra.pfc || '' });
+function fileVault() {
+  // September from a statement file: opens at 900, one coffee, closes at 1000 after pay.
+  const v = emptyVault();
+  v.statements.push({ id: '2026-09', start: '2026-09-01', end: '2026-09-30', opening: 900, closing: 1000, reconciled: true, source: 'pdf' });
+  v.transactions.push({ id: '2026-09-0901-001', date: '2026-09-02', merchant: 'VISA DEBIT PURCHASE STARBUCKS', name: '', amount: -5, category: 'other', statement: '2026-09' });
+  v.transactions.push({ id: '2026-09-0901-002', date: '2026-09-15', merchant: 'PAYROLL DEPOSIT EXAMPLE CORP', name: '', amount: 105, category: 'other', statement: '2026-09' });
+  v.bank = { institution: 'Sample Bank', accessToken: 'access-sandbox-x', accountId: 'acc-chq', accountName: 'Chequing', type: 'depository', cursor: '' };
+  return v;
+}
+
+await test('synced transactions fill only the days after your statement files', () => {
+  const v = fileVault();
+  const res = {
+    added: [
+      feed('p1', '2026-09-15', -105, 'Payroll'), // already in the September file
+      feed('o1', '2026-10-02', 12.5, 'Qwerty Studio', { pfc: 'PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS' }),
+      feed('o2', '2026-10-03', 6.25, 'Starbucks', { merchant: 'Starbucks', original: 'VISA DEBIT PURCHASE STARBUCKS 1234', pfc: 'FOOD_AND_DRINK_RESTAURANT' }),
+      feed('o3', '2026-10-04', 40, 'Pending thing', { pending: true }),
+      feed('o4', '2026-10-04', 70, 'Card purchase', { account: 'acc-card' }),
+      feed('o5', '2026-10-05', -200, 'Mystery deposit', { pfc: 'INCOME_WAGES' }),
+    ],
+    modified: [], removed: [], cursor: 'c6', accounts: [{ id: 'acc-chq', current: 1181.25, currency: 'CAD', type: 'depository' }],
+  };
+  const counts = applyBankSync(v, res, { today: '2026-10-08' });
+  assert.deepEqual(counts, { added: 3, updated: 0, removed: 0, skipped: 1 });
+  assert.equal(v.bank.cursor, 'c6');
+  const m = buildModel(v, compiled);
+  const by = (ext) => m.txns.find((t) => t.ext === ext);
+  assert.equal(by('o1').amount, -12.5, 'money out is negative');
+  assert.equal(by('o1').cat.id, 'fitness', 'unknown place: the bank feed’s category');
+  assert.equal(by('o2').cat.id, 'coffee', 'known place: Money’s own rules win');
+  assert.equal(by('o2').name, 'Starbucks');
+  assert.equal(by('o5').cat.id, 'income');
+  // October has its own statement, with balances worked back from the bank's balance now.
+  const oct = v.statements.find((s) => s.id === '2026-10');
+  assert.deepEqual([oct.start, oct.end, oct.opening, oct.closing, oct.source, oct.reconciled], ['2026-10-01', '2026-10-08', 1000, 1181.25, 'sync', null]);
+  assert.equal(dailyBalance(m).at(-1).bal, 118125);
+  assert.ok(!JSON.stringify(v).includes('access-sandbox-x') || v.bank.accessToken === 'access-sandbox-x', 'the token lives only in vault.bank');
+});
+
+await test('the bank’s corrections and removals, keeping your own changes', () => {
+  const v = fileVault();
+  applyBankSync(v, { added: [feed('o1', '2026-10-02', 12.5, 'Qwerty Studio'), feed('o2', '2026-10-03', 8, 'Corner Shop')], modified: [], removed: [], cursor: 'c2', accounts: [] }, { today: '2026-10-08' });
+  const o1 = v.transactions.find((t) => t.ext === 'o1');
+  o1.category = 'health'; o1.locked = true;
+  applyBankSync(v, { added: [], modified: [feed('o1', '2026-10-02', 13.75, 'Qwerty Studio')], removed: ['o2'], cursor: 'c3', accounts: [] }, { today: '2026-10-08' });
+  assert.equal(o1.amount, -13.75);
+  assert.equal(o1.locked, true);
+  assert.equal(o1.category, 'health');
+  assert.equal(v.transactions.some((t) => t.ext === 'o2'), false);
+});
+
+await test('a statement added later replaces the synced days it covers', () => {
+  const v = fileVault();
+  applyBankSync(v, { added: [feed('o1', '2026-10-02', 12.5, 'Qwerty Studio'), feed('o2', '2026-11-03', 8, 'Corner Shop')], modified: [], removed: [], cursor: 'c2', accounts: [{ id: 'acc-chq', current: 979.5 }] }, { today: '2026-11-04' });
+  // The October PDF arrives.
+  const parsed = { period: { start: '2026-10-01', end: '2026-10-31' }, opening: 1000, closing: 987.5, transactions: [{ date: '2026-10-02', description: 'RETAIL PURCHASE QWERTY STUDIO', amount: -12.5, balance: 987.5 }] };
+  commitImport(v, prepareImport(v, parsed, compiled));
+  assert.equal(v.transactions.filter((t) => t.statement === '2026-10').length, 1);
+  assert.equal(v.transactions.some((t) => t.ext === 'o1'), false);
+  assert.notEqual(v.statements.find((s) => s.id === '2026-10').source, 'sync');
+  // The feed sends October again: it belongs to the file now.
+  const c = applyBankSync(v, { added: [feed('o1', '2026-10-02', 12.5, 'Qwerty Studio')], modified: [], removed: [], cursor: 'c3', accounts: [{ id: 'acc-chq', current: 979.5 }] }, { today: '2026-11-04' });
+  assert.equal(c.skipped, 1);
+  assert.equal(v.statements.find((s) => s.id === '2026-11').opening, 987.5);
+});
+
+await test('a file that stops mid-month is carried on by the feed', () => {
+  const v = fileVault();
+  v.statements.push({ id: '2026-10', start: '2026-10-01', end: '2026-10-15', opening: 1000, closing: 990, reconciled: null, source: 'csv' });
+  v.transactions.push({ id: '2026-10-1001-001', date: '2026-10-10', merchant: 'CORNER SHOP', name: '', amount: -10, category: 'other', statement: '2026-10' });
+  applyBankSync(v, { added: [feed('o1', '2026-10-12', 10, 'Corner Shop'), feed('o2', '2026-10-20', 25, 'Book Nook')], modified: [], removed: [], cursor: 'c2', accounts: [{ id: 'acc-chq', current: 965 }] }, { today: '2026-10-21' });
+  const oct = v.statements.find((s) => s.id === '2026-10');
+  assert.deepEqual([oct.fileEnd, oct.end, oct.closing, oct.synced, oct.count], ['2026-10-15', '2026-10-21', 965, true, 2]);
+  assert.equal(lastFileDay(v), '2026-10-15');
+  assert.equal(v.statements.length, 2);
+});
+
+await test('bank categories map to Money’s', () => {
+  assert.equal(hintCategory('FOOD_AND_DRINK_GROCERIES'), 'groceries');
+  assert.equal(hintCategory('GENERAL_MERCHANDISE_ELECTRONICS'), 'electronics');
+  assert.equal(hintCategory('RENT_AND_UTILITIES_RENT'), 'housing');
+  assert.equal(hintCategory('TRANSFER_OUT_ACCOUNT_TRANSFER'), 'own');
+  assert.equal(hintCategory('INCOME_WAGES', -10), null, 'money out is never income');
+  assert.equal(hintCategory('FOOD_AND_DRINK_RESTAURANT', 10), 'dining', 'a refund keeps its category');
+  assert.equal(hintCategory('SOMETHING_NEW'), null);
 });
 
 console.log('PDF import (synthetic statements)');
