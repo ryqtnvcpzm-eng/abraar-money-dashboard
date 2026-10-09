@@ -29,7 +29,7 @@ export function renderActivity(page) {
   let lastMonth = null;
 
   const dayHtml = ([d, list]) => {
-    const net = list.filter((t) => !t.netted).reduce((sum, t) => sum + t.c, 0);
+    const net = list.filter((t) => !t.netted).reduce((sum, t) => sum + (t.split ? t.live : t.c), 0);
     const mh = d.slice(0, 7) !== lastMonth ? (lastMonth = d.slice(0, 7), `<h2 class="t-title3" style="margin:26px 4px 0">${esc(monthLabel(lastMonth))}</h2>`) : '';
     return `${mh}<div class="day"><div class="list-head"><span>${esc(dateLabel(d))}</span><span>${net ? money(fromCents(net), { sign: true }) : ''}</span></div>
       <div class="list">${list.map((t) => txnRow(t)).join('')}</div></div>`;
@@ -65,7 +65,7 @@ export function renderActivity(page) {
     const count = items.length;
     lastMonth = null;
     rendered = 0;
-    listEl.innerHTML = `${app.ui.search || app.ui.filter !== 'all' ? `<p class="note" style="margin:0 4px">${count.toLocaleString('en-CA')} ${count === 1 ? 'result' : 'results'} · ${money(fromCents(items.filter((t) => !t.netted).reduce((sum, t) => sum + t.c, 0)), { sign: true })} net</p>` : ''}<div id="act-more" style="height:40px"></div>`;
+    listEl.innerHTML = `${app.ui.search || app.ui.filter !== 'all' ? `<p class="note" style="margin:0 4px">${count.toLocaleString('en-CA')} ${count === 1 ? 'result' : 'results'} · ${money(fromCents(items.filter((t) => !t.netted).reduce((sum, t) => sum + (t.split ? t.live : t.c), 0)), { sign: true })} net</p>` : ''}<div id="act-more" style="height:40px"></div>`;
     observer?.disconnect();
     appendUpTo(app.ui.actShown || PAGE);
     const more = listEl.querySelector('#act-more');
@@ -104,14 +104,23 @@ function filtered() {
   // "$1,460" and "1460" both find $1,460.00.
   const words = app.ui.search.toLowerCase().split(/\s+/).filter(Boolean).map((w) => w.replace(/^[$€£¥₹]/, '').replace(/(\d),(?=\d{3}\b)/g, '$1'));
   const f = app.ui.filter;
-  return app.model.txns.filter((t) => {
+  // A split charge is one line here (as on the statement), not one per part.
+  const seen = new Set();
+  const rows = [];
+  for (const t of app.model.txns) {
+    if (!t.partOf) { rows.push(t); continue; }
+    if (seen.has(t.partOf)) continue;
+    seen.add(t.partOf);
+    rows.push(app.model.byId.get(t.partOf));
+  }
+  return rows.filter((t) => {
     if (f === 'out' && t.c >= 0) return false;
     if (f === 'in' && t.c <= 0) return false;
     if (f === 'oneoff' && !t.oneOff) return false;
     if (f === 'reversed' && !t.netted) return false;
     if (!words.length) return true;
     // Built once per transaction per model, not on every keystroke.
-    t.hay ||= `${t.name} ${t.merchant} ${t.cat.name} ${Math.abs(t.amount).toFixed(2)} ${monthLabel(t.month)} ${dateLabel(t.date)}`.toLowerCase();
+    t.hay ||= `${t.name} ${t.merchant} ${t.cat.name} ${Math.abs(t.amount).toFixed(2)} ${monthLabel(t.month)} ${dateLabel(t.date)} ${(t.note || []).join(' ')} ${(t.split || []).flatMap((p) => p.note || []).join(' ')}`.toLowerCase();
     return words.every((w) => t.hay.includes(w));
   });
 }

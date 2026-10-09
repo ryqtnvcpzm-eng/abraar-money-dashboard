@@ -51,7 +51,9 @@
           "statement": { "type": "string", "description": "Statement month this came from (YYYY-MM)" },
           "balance": { "type": "number", "description": "Running balance printed beside it, when CIBC prints one" },
           "locked": { "type": "boolean", "description": "Category chosen by hand for this one transaction" },
-          "oneOff": { "type": "boolean", "description": "Excluded from Everyday spending" }
+          "oneOff": { "type": "boolean", "description": "Excluded from Everyday spending" },
+          "parts": { "type": "array", "description": "Split by hand: the charge counted in several categories. Amounts are signed like the charge and add up to it.", "items": { "type": "object", "required": ["category", "amount"], "properties": { "category": { "type": "string" }, "amount": { "type": "number" } } } },
+          "items": { "type": "array", "description": "What an Amazon charge bought, from the order history. Items in different categories split the charge (tax and shipping spread over them).", "items": { "type": "object", "required": ["title", "amount", "category"], "properties": { "title": { "type": "string", "maxLength": 90 }, "amount": { "type": "number", "description": "Positive dollars, what the item cost including its tax" }, "category": { "type": "string" }, "qty": { "type": "integer" }, "set": { "type": "boolean", "description": "Category chosen by hand" } } } }
         }
       }
     },
@@ -71,6 +73,12 @@
         "lines": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "amount": { "type": "number" }, "categories": { "type": "array", "items": { "type": "string" } } } } }
       }
     },
+    "orders": {
+      "type": "array",
+      "description": "Amazon shipments read from the order history that no statement has matched yet (the latest year, at most 1,500), so a statement added later can still be sorted. No order numbers, addresses, payment or tracking details.",
+      "items": { "type": "object", "properties": { "date": { "type": "string", "format": "date" }, "ship": { "type": "string", "format": "date" }, "cents": { "type": "integer" }, "ref": { "type": "string", "description": "Links shipments of one order; not Amazon's order number" }, "items": { "type": "array" } } }
+    },
+    "dismissed": { "type": "array", "items": { "type": "string" }, "description": "Possible double charges you said were both real" },
     "settings": { "type": "object", "properties": { "autoLockMinutes": { "type": "integer" } } }
   }
 }

@@ -10,6 +10,10 @@ raw/
 *.xlsx
 *.ofx
 *.qfx
+*.qif
+*.tsv
+# Amazon order-history downloads (they include your addresses)
+*.zip
 data/*.json
 !data/rules.json
 !data/vault.enc.json
