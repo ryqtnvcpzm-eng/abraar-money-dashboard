@@ -54,6 +54,7 @@ Anything else is flagged in red, and importing it needs an explicit *Import anyw
 | Weak passphrase | 12-character minimum plus a strength check, with a nudge toward four or more random words. The file is public, so the passphrase is the whole defense. |
 | Statement PDFs leak | They're read in memory and never stored. `*.pdf` is in `.gitignore`. |
 | Account numbers | The parser never reads the header block. Descriptions are scrubbed of card numbers, 5+ digit runs and account or transit fragments before storage, and a test enforces this. |
+| Biometric unlock | Optional, per device. A platform passkey (iCloud Keychain, user verification required) evaluates the WebAuthn PRF extension. HKDF of that secret encrypts the raw vault key, and the result is stored only in that browser. Releasing it needs Face ID or Touch ID on that device; the passphrase is never stored. It's bound to the vault's KDF salt, so a passphrase change retires it. |
 | Phone left unlocked | Auto-lock after 1, 2, 5 or 15 minutes idle, and after more than a minute in the background. Locking drops the key and wipes the DOM. |
 | Malicious script | Strict CSP: `script-src 'self'`, `connect-src 'self' https://api.github.com`, no inline scripts, and pdf.js vendored rather than loaded from a CDN. Statement text is HTML-escaped everywhere. |
 | GitHub token theft | Optional. It's a fine-grained token for one repo with Contents read/write, stored in localStorage **encrypted with the vault key**. |

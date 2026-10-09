@@ -3,6 +3,7 @@ import { app } from '../state.js';
 import { money, monthLabel, dateLabel, esc, plural } from '../format.js';
 import * as crypto from '../crypto.js';
 import * as store from '../store.js';
+import * as bio from '../biometric.js';
 import { icon, openSheet, haptic, toast, alertSheet } from '../ui.js';
 
 const row = (ic, color, title, { sub = '', detail = '', act = '', chev = true, cls = '' } = {}) => `
@@ -38,6 +39,11 @@ export function openSettings() {
 
       <div class="list-head"><span>Security</span></div>
       <div class="list">
+        ${app.bioSupported && !app.demo ? `<label class="row with-icon">
+          <span class="cat-icon sm" style="--c:var(--green)">${icon(bio.label() === 'Face ID' ? 'faceid' : 'touchid')}</span>
+          <span class="main"><span class="title">${bio.label()}</span><span class="subtitle">Skip typing your passphrase</span></span>
+          <span class="switch"><input type="checkbox" data-act="bio" ${bio.isEnrolledFor(app.env) ? 'checked' : ''} aria-label="${bio.label()}"><span></span></span>
+        </label>` : ''}
         ${row('timer', 'red', 'Auto-Lock', { detail: lockMin === 1 ? '1 minute' : `${lockMin} minutes`, act: 'autolock' })}
         ${row('key', 'gray', 'Change Passphrase', { act: 'passphrase' })}
         ${row('lock', 'blue', 'Lock Now', { act: 'lock', chev: false })}
@@ -50,7 +56,16 @@ export function openSettings() {
       <p class="list-foot">${app.env ? `Vault revision ${app.env.rev} · saved ${esc(new Date(app.env.savedAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }))}<br>` : ''}AES-256-GCM · PBKDF2-SHA-256 × ${(app.env?.kdf?.iterations || crypto.KDF_ITERATIONS).toLocaleString('en-CA')}</p>`);
   };
   draw();
+  sheet.el.addEventListener('change', async (e) => {
+    if (e.target.dataset.act !== 'bio') return;
+    haptic();
+    if (e.target.checked) { e.target.checked = false; openBiometricSetup(draw); return; }
+    const off = await alertSheet({ title: `Turn off ${bio.label()}?`, message: 'You’ll unlock with your passphrase on this device. The passkey stays in Passwords until you delete it there.', actions: [{ label: 'Turn Off', value: true, style: 'destructive' }, { label: 'Cancel', value: false, style: 'cancel' }] });
+    if (off) { bio.disable(); toast(`${bio.label()} is off`); }
+    draw();
+  });
   sheet.el.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-act="bio"]')) return;
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (!act) return;
     haptic();
@@ -261,9 +276,64 @@ function changePassphrase() {
     }
     const token = await store.getToken(app.session);
     app.session = await crypto.createSession(g('#cp1'));
+    const hadBio = bio.enrollment();
+    bio.disable(); // the old biometric copy belongs to the old key
     if (token) await store.setToken(app.session, token);
     await app.commit({ silent: true });
     sheet.close();
-    toast('Passphrase changed. Save to GitHub to update the repo.', { icon: 'key', color: 'blue' });
+    toast(hadBio ? `Passphrase changed. Turn ${bio.label()} back on in Settings, then Save to GitHub.` : 'Passphrase changed. Save to GitHub to update the repo.', { icon: 'key', color: 'blue' });
+  });
+}
+
+function openBiometricSetup(onDone) {
+  const name = bio.label();
+  const sheet = openSheet({
+    title: `Turn On ${name}`, size: 'full',
+    body: `
+      <div class="sheet-hero" style="padding-top:12px">
+        <span class="cat-icon lg" style="--c:var(--green)">${icon(name === 'Face ID' ? 'faceid' : 'touchid')}</span>
+        <div class="name">Unlock with ${esc(name)}</div>
+        <p class="when" style="max-width:340px;margin:8px auto 0">Money saves a passkey in your iCloud Keychain. ${esc(name)} unlocks it, and it unlocks your vault on this device. Your passphrase is never stored, and it still works everywhere.</p>
+      </div>
+      <form class="lock-form" id="bio-form" autocomplete="off">
+        <input type="text" name="username" value="money-vault" autocomplete="username" hidden>
+        <input class="field" type="password" id="bio-pass" placeholder="Passphrase" autocomplete="current-password" required aria-label="Passphrase">
+        <button class="btn" type="submit" id="bio-go">Continue</button>
+        <div class="err" id="bio-err" role="alert"></div>
+      </form>
+      <p class="list-foot">Set it up separately on your iPhone and your Mac. Needs iOS 18 or macOS 15 or later. If you change your passphrase, turn it on again.</p>`,
+  });
+  setTimeout(() => sheet.el.querySelector('#bio-pass')?.focus(), 400);
+  sheet.el.querySelector('#bio-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pass = sheet.el.querySelector('#bio-pass');
+    const err = sheet.el.querySelector('#bio-err');
+    const btn = sheet.el.querySelector('#bio-go');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+    err.textContent = '';
+    let bits;
+    try {
+      bits = await crypto.deriveKeyBits(pass.value, crypto.unb64(app.env.kdf.salt), app.env.kdf.iterations);
+      await crypto.openWithSession(app.env, { key: await crypto.keyFromBits(bits) }); // checks the passphrase
+    } catch {
+      bits?.fill(0);
+      haptic('error'); err.textContent = 'Incorrect passphrase.'; btn.disabled = false; btn.textContent = 'Continue'; return;
+    }
+    pass.value = '';
+    try {
+      await bio.enroll(bits, app.env);
+      haptic();
+      sheet.close();
+      toast(`${name} is on`, { icon: name === 'Face ID' ? 'faceid' : 'touchid', color: 'green' });
+      onDone?.();
+    } catch (ex) {
+      haptic('error');
+      err.textContent = ex?.name === 'NotAllowedError' ? `${name} was cancelled. Try again when you’re ready.`
+        : ex?.message === 'PRF_UNSUPPORTED' ? `This browser can’t do ${name} unlock yet. Use Safari on iOS 18 / macOS 15 or later.`
+        : `Couldn’t set up ${name} (${ex?.name || 'error'}).`;
+      btn.disabled = false; btn.textContent = 'Try Again';
+    } finally {
+      bits.fill(0);
+    }
   });
 }
