@@ -1,13 +1,13 @@
 // Service worker: makes Money open offline. Caches only this site's own files.
 // The encrypted vault is fetched network-first so new statements show up, with the cached copy as fallback.
 // Bump VERSION whenever app files change.
-const VERSION = 'money-v1.1.0';
+const VERSION = 'money-v1.2.0';
 const SHELL = [
   './', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/state.js', 'js/format.js', 'js/crypto.js', 'js/store.js', 'js/biometric.js', 'js/ui.js', 'js/charts.js',
   'js/categorize.js', 'js/cibc-parser.js', 'js/ledger.js', 'js/pdf-text.js', 'js/demo.js',
   'js/views/overview.js', 'js/views/spending.js', 'js/views/activity.js', 'js/views/plan.js',
-  'js/views/sheets.js', 'js/views/importer.js', 'js/views/settings.js',
+  'js/views/sheets.js', 'js/views/insight.js', 'js/views/importer.js', 'js/views/settings.js',
   'vendor/pdfjs/pdf.min.mjs', 'vendor/pdfjs/pdf.worker.min.mjs',
   'data/rules.json', 'icons/favicon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];

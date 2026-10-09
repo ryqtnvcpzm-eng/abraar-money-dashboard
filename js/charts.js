@@ -217,6 +217,101 @@ export function miniColumns(months, color) {
 }
 
 // ---------------------------------------------------------------------------
+// Column chart with a readout (Health-style): highlight one bar, optional reference line,
+// touch or hover any bar to read its value.
+// ---------------------------------------------------------------------------
+/**
+ * bars: [{ key, label, title, v }]   (label = axis text, title = readout text)
+ * opts: { color, highlight: key, ref: { v, label }, format(v) -> string, height, unit }
+ */
+export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref = null, format = moneyShort, readout = null, refFormat = null, height = 190 } = {}) {
+  // Axis ticks stay compact; the readout and the reference label show the exact figure.
+  const exact = readout || (format === moneyShort ? (x) => money(x, { cents: false }) : format);
+  const refFmt = refFormat || exact;
+  const W = Math.max(260, wrap.clientWidth || 320);
+  const H = height;
+  const pad = { t: 18, r: 40, b: 22, l: 2 };
+  const iw = W - pad.l - pad.r;
+  const ih = H - pad.t - pad.b;
+  const maxV = Math.max(1e-9, ...bars.map((b) => b.v), ref ? ref.v : 0);
+  const step = niceStep(maxV, 3);
+  const top = Math.ceil((maxV * 1.08) / step) * step || 1;
+  const Y = (v) => pad.t + ih * (1 - v / top);
+  const band = iw / bars.length;
+  const bw = Math.min(24, band * 0.62);
+  let def = bars.findIndex((b) => b.key === highlight);
+  let grid = '';
+  for (let v = step; v <= top + 1e-9; v += step) {
+    grid += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(v)}" y2="${Y(v)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
+    grid += `<text class="chart-axis" x="${W - 2}" y="${Y(v) + 4}" text-anchor="end">${esc(format(v))}</text>`;
+  }
+  grid += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(0)}" y2="${Y(0)}" style="stroke:var(--label-3)" stroke-width="1" shape-rendering="crispEdges"/>`;
+  const thin = bars.length > 14;
+  const cols = bars.map((b, i) => {
+    const cx = pad.l + band * i + band / 2;
+    const x = cx - bw / 2;
+    const h = b.v > 0 ? Math.max(2, (ih * b.v) / top) : 0;
+    const y = Y(0) - h;
+    const r = Math.min(4, h, bw / 2);
+    const path = h ? `M${x},${Y(0)}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${Y(0)}Z` : '';
+    const showLabel = !thin || i % 2 === 0 || i === def;
+    return `<g class="cc-bar" data-i="${i}">
+      <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 34}" fill="transparent"/>
+      ${path ? `<path d="${path}" style="fill:var(--${color});transition:opacity 180ms"/>` : ''}
+      <text class="chart-axis cc-x" x="${cx}" y="${H - 6}" text-anchor="middle">${showLabel ? esc(b.label) : ''}</text></g>`;
+  }).join('');
+  const refLine = ref ? `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(ref.v)}" y2="${Y(ref.v)}" style="stroke:var(--label)" stroke-opacity=".55" stroke-width="1.5"/>
+    <text class="chart-axis" x="${pad.l + 2}" y="${Y(ref.v) - 5}" style="fill:var(--label-2);font-weight:600;paint-order:stroke;stroke:var(--sheet-row, var(--bg-2));stroke-width:4px;stroke-linejoin:round">${esc(ref.label)} ${esc(refFmt(ref.v))}</text>` : '';
+  wrap.innerHTML = `<div class="chart-readout"><span class="k"></span><b class="v"></b></div>
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(bars.map((b) => `${b.title}: ${exact(b.v)}`).join(', '))}">${grid}${cols}${refLine}</svg>`;
+  const svg = wrap.querySelector('svg');
+  const k = wrap.querySelector('.chart-readout .k');
+  const v = wrap.querySelector('.chart-readout .v');
+  const groups = [...svg.querySelectorAll('.cc-bar')];
+  let active = -2;
+  const show = (i) => {
+    if (i === active) return;
+    if (active !== -2 && i >= 0) haptic();
+    active = i;
+    groups.forEach((g, j) => {
+      const p = g.querySelector('path');
+      if (p) p.style.opacity = i < 0 ? 1 : j === i ? 1 : 0.35;
+      const t = g.querySelector('.cc-x');
+      t.style.fill = j === i ? 'var(--label)' : '';
+      t.style.fontWeight = j === i ? '600' : '';
+    });
+    if (i >= 0) { k.textContent = bars[i].title; v.textContent = exact(bars[i].v); }
+    else if (ref) { k.textContent = ref.label; v.textContent = refFmt(ref.v); }
+    else { k.textContent = ''; v.textContent = ''; }
+  };
+  show(def);
+  if (!reducedMotion()) {
+    svg.querySelectorAll('.cc-bar path').forEach((p, i) => {
+      p.style.transformOrigin = `0 ${Y(0)}px`;
+      p.animate([{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }], { duration: 650, delay: i * 25, easing: 'cubic-bezier(.2,.9,.25,1)', fill: 'backwards' });
+    });
+  }
+  const at = (clientX) => {
+    const rr = svg.getBoundingClientRect();
+    const x = ((clientX - rr.left) / rr.width) * W;
+    return Math.max(0, Math.min(bars.length - 1, Math.floor((x - pad.l) / band)));
+  };
+  let down = false;
+  svg.addEventListener('pointerdown', (e) => { down = true; show(at(e.clientX)); });
+  svg.addEventListener('pointermove', (e) => { if (down || e.pointerType === 'mouse') show(at(e.clientX)); });
+  const reset = () => { down = false; show(def); };
+  svg.addEventListener('pointerup', (e) => { down = false; if (e.pointerType === 'mouse') return; setTimeout(() => show(def), 1200); });
+  svg.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') reset(); });
+  svg.addEventListener('pointercancel', reset);
+  svg.tabIndex = 0;
+  svg.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    show(Math.max(0, Math.min(bars.length - 1, (active < 0 ? bars.length - 1 : active) + (e.key === 'ArrowLeft' ? -1 : 1))));
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Activity rings
 // ---------------------------------------------------------------------------
 /** rings: [{p (0..n), c1, c2, label}] outer → inner. Animate with animateRings(el). */

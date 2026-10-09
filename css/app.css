@@ -98,6 +98,7 @@
 
 /* ---------- base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
+* { touch-action: manipulation; } /* no double-tap zoom: it's an app, not a page */
 html, body { height: 100%; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
@@ -308,9 +309,29 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
   flex: 0 0 min(84%, 340px); scroll-snap-align: start; background: var(--bg-2); border-radius: var(--radius-card); padding: 16px 16px 18px; min-height: 172px;
   display: flex; flex-direction: column; gap: 6px; transition: transform 300ms var(--spring-bounce);
 }
-.insight:active { transform: scale(.98); }
-.insight .kicker { display: flex; align-items: center; gap: 8px; font: 600 13px/18px var(--font); color: var(--c); text-transform: uppercase; letter-spacing: .2px; }
-.insight .kicker .icon { font-size: 16px; stroke-width: 2.4; }
+.insight { border: 0; text-align: left; color: inherit; font: inherit; cursor: pointer; }
+.insight:active { transform: scale(.97); }
+.insight .kicker .chev { margin-left: auto; color: var(--label-3); font-size: 14px; stroke-width: 2.6; }
+@media (hover: hover) { .insight:hover { box-shadow: 0 0 0 1px var(--separator); } }
+/* insight detail */
+.ins-hero { padding: 4px 4px 16px; }
+.ins-hero .kicker { display: flex; align-items: center; gap: 8px; font: 600 13px/18px var(--font); color: color-mix(in srgb, var(--c) 72%, var(--label)); text-transform: uppercase; letter-spacing: .2px; }
+.ins-hero .kicker .icon { font-size: 16px; stroke-width: 2.4; }
+.ins-hero h1 { margin: 6px 0 6px; font: 700 28px/34px var(--font-display); letter-spacing: .36px; }
+.ins-hero p { margin: 0; color: var(--label-2); font: 400 17px/22px var(--font); }
+.card-title { font: 600 15px/20px var(--font); margin-bottom: 4px; }
+.ins-card .chart-wrap { margin: 0; cursor: default; }
+.chart-readout { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 30px; margin: 2px 0 6px; }
+.chart-readout .k { font: 400 13px/18px var(--font); color: var(--label-2); }
+.chart-readout .v { font: 700 22px/28px var(--font-display); letter-spacing: .2px; font-variant-numeric: tabular-nums; }
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.stat-grid .tile { background: var(--sheet-row, var(--bg-2)); border-radius: 16px; padding: 12px 12px 11px; min-width: 0; }
+.stat-grid .k { font: 400 13px/17px var(--font); color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-grid .v { font: 600 19px/24px var(--font-display); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-grid .s { font: 400 12px/16px var(--font); color: var(--label-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.insight .kicker { display: flex; align-items: center; gap: 8px; font: 600 13px/18px var(--font); color: color-mix(in srgb, var(--c) 72%, var(--label)); text-transform: uppercase; letter-spacing: .2px; }
+.insight .kicker .icon, .ins-hero .kicker .icon { font-size: 16px; stroke-width: 2.4; color: var(--c); }
+.insight .kicker .chev { color: var(--label-3); }
 .insight h3 { margin: 4px 0 0; font: 700 22px/27px var(--font-display); letter-spacing: .3px; }
 .insight p { margin: 0; color: var(--label-2); font: 400 15px/20px var(--font); }
 .dots { display: flex; justify-content: center; gap: 7px; margin: 10px 0 0; }

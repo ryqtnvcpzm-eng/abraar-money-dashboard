@@ -307,7 +307,7 @@ export function insights(model, today = iso(new Date())) {
   if (freq && freq.count >= 5) {
     const first = model.txns.find((t) => t.name === freq.name).date;
     const span = Math.max(1, daysBetween(first, model.txns[model.txns.length - 1].date));
-    out.push({ id: 'habit', icon: freq.cat.icon, color: freq.cat.color, kicker: 'Most visited', title: `${freq.name} ×${freq.count}`, value: $(freq.cents),
+    out.push({ id: 'habit', merchant: freq.name, icon: freq.cat.icon, color: freq.cat.color, kicker: 'Most visited', title: `${freq.name} ×${freq.count}`, value: $(freq.cents),
       text: `About once every ${Math.max(1, Math.round(span / freq.count))} days, averaging ${fmt$(freq.cents / freq.count)}. That’s ${fmt$(freq.cents / nFull, 0)} a month.` });
   }
 
@@ -331,7 +331,7 @@ export function insights(model, today = iso(new Date())) {
     const avgOther = others.reduce((s, m) => s + m.total, 0) / others.length;
     if (big.total > avgOther * 1.6) {
       const top = big.rows[0];
-      out.push({ id: 'bigmonth', icon: top.cat.icon, color: top.cat.color, kicker: 'Biggest month', title: `${monthLabel(big.ym, 'month')}: ${fmt$(big.total, 0)} out`, value: $(big.total),
+      out.push({ id: 'bigmonth', ym: big.ym, icon: top.cat.icon, color: top.cat.color, kicker: 'Biggest month', title: `${monthLabel(big.ym, 'month')}: ${fmt$(big.total, 0)} out`, value: $(big.total),
         text: `${top.cat.name} was ${Math.round(top.cents / big.total * 100)}% of it. A typical month is closer to ${fmt$(avgOther, 0)}.` });
     }
   }
@@ -366,7 +366,7 @@ export function insights(model, today = iso(new Date())) {
     }
     if (best && Math.abs(best.delta) > 2500) {
       const up = best.delta > 0;
-      out.push({ id: 'mover', icon: best.r.cat.icon, color: best.r.cat.color, kicker: `${monthLabel(latest, 'month')} · ${best.r.cat.name}`, title: `${fmt$(best.r.cents, 0)}, ${up ? 'up' : 'down'} ${Math.round(Math.abs(best.delta) / best.avg * 100)}%`, value: $(best.r.cents),
+      out.push({ id: 'mover', catId: best.r.cat.id, ym: latest, icon: best.r.cat.icon, color: best.r.cat.color, kicker: `${monthLabel(latest, 'month')} · ${best.r.cat.name}`, title: `${fmt$(best.r.cents, 0)}, ${up ? 'up' : 'down'} ${Math.round(Math.abs(best.delta) / best.avg * 100)}%`, value: $(best.r.cents),
         text: `Your average before that was ${fmt$(best.avg, 0)} a month.` });
     }
   }
