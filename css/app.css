@@ -328,6 +328,7 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
 .stat-grid .tile { background: var(--sheet-row, var(--bg-2)); border-radius: 16px; padding: 12px 12px 11px; min-width: 0; }
 .stat-grid .k { font: 400 13px/17px var(--font); color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat-grid .v { font: 600 19px/24px var(--font-display); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 .stat-grid .s { font: 400 12px/16px var(--font); color: var(--label-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .insight .kicker { display: flex; align-items: center; gap: 8px; font: 600 13px/18px var(--font); color: color-mix(in srgb, var(--c) 72%, var(--label)); text-transform: uppercase; letter-spacing: .2px; }
 .insight .kicker .icon, .ins-hero .kicker .icon { font-size: 16px; stroke-width: 2.4; color: var(--c); }
@@ -564,3 +565,11 @@ button.row:active, a.row:active, .row.tap:active { background: var(--fill-3); }
 .teach-chip .icon { width: 16px; height: 16px; color: var(--c, var(--gray)); }
 .teach-chip.plain { background: var(--fill-3); color: var(--label-2); }
 .teach-chip:active { transform: scale(.96); }
+
+@media (max-width: 360px) {
+  /* Narrow phones: money must never be cut off ("$10,…"); smaller type and tighter tiles instead. */
+  .stat-grid { gap: 6px; }
+  .stat-grid .tile { padding: 10px 8px 9px; }
+  .stat-grid .v { font-size: 15px; line-height: 20px; text-overflow: clip; letter-spacing: -0.2px; }
+  .stat .v { font-size: 15px; letter-spacing: -0.2px; }
+}

@@ -326,16 +326,16 @@ export function openPlanEditor() {
           <div class="row-top" style="display:flex;justify-content:space-between"><span class="title">Save</span><span class="value" id="pe-pct-l">${d.savePct}%</span></div>
           <input type="range" id="pe-pct" min="0" max="90" step="1" value="${d.savePct}" style="width:100%;margin:10px 0 2px;accent-color:var(--green)" aria-label="Savings percentage">
         </div>
-        <div class="row"><span class="main"><span class="title">Saved each month</span></span><span class="detail num pos">${money(save, { cents: false })}</span></div>
-        <div class="row"><span class="main"><span class="title">Left to spend</span></span><span class="detail num">${money(spend, { cents: false })}</span></div>
+        <div class="row"><span class="main"><span class="title">Saved each month</span></span><span class="detail num pos" id="pe-save">${money(save, { cents: false })}</span></div>
+        <div class="row"><span class="main"><span class="title">Left to spend</span></span><span class="detail num" id="pe-spend">${money(spend, { cents: false })}</span></div>
       </div>
       ${d.lines?.length ? `
-      <div class="list-head"><span>Spending budget</span><span class="${sum === spend ? '' : 'neg'}">${money(sum, { cents: false })} of ${money(spend, { cents: false })}</span></div>
+      <div class="list-head"><span>Spending budget</span><span id="pe-sum" class="${sum === spend ? '' : 'neg'}">${money(sum, { cents: false })} of ${money(spend, { cents: false })}</span></div>
       <div class="list">${d.lines.map((l, i) => `
         <label class="row"><span class="main"><span class="title">${esc(l.name)}</span><span class="subtitle">${esc(l.categories.map((c) => (c === '*' ? 'everything else' : app.model.cats.get(c)?.name || c)).join(', '))}</span></span>
           <input class="inline num" inputmode="decimal" data-line="${i}" value="${l.amount}" aria-label="${esc(l.name)} budget"></label>`).join('')}
       </div>
-      <div class="btn-row"><button class="btn secondary" data-act="resplit">Use the suggested budget for ${money(spend, { cents: false })}</button></div>`
+      <div class="btn-row"><button class="btn secondary" data-act="resplit" id="pe-resplit">Use the suggested budget for ${money(spend, { cents: false })}</button></div>`
       : `<p class="list-foot">After you enter your take-home pay, Money suggests a split of the spending budget that you can adjust.</p>`}
       <p class="list-foot">Your plan is stored inside the encrypted vault, never in the public code.</p>`);
   };
@@ -353,12 +353,37 @@ export function openPlanEditor() {
     d.eatingOut ||= [...app.rules.planTemplate.eatingOut];
     draft = d;
   };
+  /** Update the worked-out numbers in place, so the field you're in keeps focus (and the slider keeps moving). */
+  const refresh = () => {
+    const d = draft;
+    const save = Math.round((Number(d.takeHome) || 0) * d.savePct / 100);
+    const spend = Math.round((Number(d.takeHome) || 0) - save);
+    const sum = (d.lines || []).reduce((t, l) => t + (Number(l.amount) || 0), 0);
+    v('#pe-pct-l').textContent = `${d.savePct}%`;
+    v('#pe-save').textContent = money(save, { cents: false });
+    v('#pe-spend').textContent = money(spend, { cents: false });
+    const sumEl = v('#pe-sum');
+    if (sumEl) { sumEl.textContent = `${money(sum, { cents: false })} of ${money(spend, { cents: false })}`; sumEl.className = sum === spend ? '' : 'neg'; }
+    const rs = v('#pe-resplit');
+    if (rs) rs.textContent = `Use the suggested budget for ${money(spend, { cents: false })}`;
+  };
+  const update = () => {
+    const before = draft?.lines?.length || 0;
+    read();
+    if ((draft.lines?.length || 0) !== before) {
+      // The budget lines just appeared: redraw, then put focus back where it was.
+      const at = document.activeElement;
+      const sel = at?.id ? `#${at.id}` : at?.dataset?.line != null ? `[data-line="${at.dataset.line}"]` : null;
+      draw();
+      if (sel) v(sel)?.focus();
+    } else refresh();
+  };
   draw();
   sheet.el.addEventListener('input', (e) => {
-    if (e.target.id === 'pe-pct') { v('#pe-pct-l').textContent = `${e.target.value}%`; }
+    if (e.target.id === 'pe-pct' || e.target.dataset.line != null) update();
   });
   sheet.el.addEventListener('change', (e) => {
-    if (['pe-take', 'pe-pct'].includes(e.target.id) || e.target.dataset.line != null) { read(); draw(); }
+    if (['pe-take', 'pe-pct'].includes(e.target.id) || e.target.dataset.line != null) update();
   });
   sheet.el.addEventListener('click', async (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;

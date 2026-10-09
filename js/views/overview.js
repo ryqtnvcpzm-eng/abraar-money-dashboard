@@ -69,8 +69,10 @@ export function renderOverview(page) {
         changeEl.innerHTML = `<span class="when">${dateLabel(p.date, 'long')}</span>`;
       } else {
         balEl.textContent = money(last.bal);
-        const d = last.bal - first.bal;
-        const pctv = first.bal ? (d / Math.abs(first.bal)) * 100 : 0;
+        // Change from the balance *before* the first day, so it matches Money in / out / Net below.
+        const startBal = first.bal - m.txns.reduce((sum, t) => (t.date === first.date ? sum + t.c : sum), 0) / 100;
+        const d = last.bal - startBal;
+        const pctv = startBal ? (d / Math.abs(startBal)) * 100 : 0;
         changeEl.innerHTML = `<span class="${d >= 0 ? 'pos' : 'neg'}">${d >= 0 ? '▲' : '▼'} ${money(Math.abs(d))} (${Math.abs(pctv).toFixed(1)}%)</span><span class="when">${rangeLabel(app.ui.range, first.date)}</span>`;
       }
     };
@@ -122,7 +124,7 @@ function banners() {
     out += `<div class="banner" style="--c:var(--indigo)"><span class="ic">${icon('sparkle')}</span><span class="txt"><b>Sample data</b><span>Made-up numbers to explore the app. Nothing is saved.</span></span><button class="btn small secondary" data-act="exit-demo">Exit</button></div>`;
   } else if (app.isDirty()) {
     out += app.account
-      ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('arrows')}</span><span class="txt"><b>Not synced yet</b><span>Saved on this device. Syncs automatically when you’re online.</span></span><button class="btn small" data-act="save">Sync</button></div>`
+      ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('arrows')}</span><span class="txt"><b>Not synced yet</b><span>${app.syncError ? `Saved on this device. ${esc(app.syncError)}` : 'Saved on this device. Syncs automatically when you’re online.'}</span></span><button class="btn small" data-act="save">Sync</button></div>`
       : `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('upload')}</span><span class="txt"><b>Changes not in your repo yet</b><span>Saved on this device. Save to GitHub to sync.</span></span><button class="btn small" data-act="save">Save</button></div>`;
   }
   const unknown = app.demo ? [] : uncategorized(app.model);

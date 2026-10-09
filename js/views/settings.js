@@ -63,12 +63,12 @@ export function openSettings() {
         ${row('lock', 'blue', 'Lock Now', { act: 'lock', chev: false })}
       </div>
 
-      <div class="list-head"><span>This device</span></div>
+      ${app.demo ? '' : `<div class="list-head"><span>This device</span></div>
       <div class="list">
         ${app.account ? `<button class="row tap destructive" data-act="signout"><span class="main"><span class="title">Sign Out on This Device</span><span class="subtitle">Removes this device’s copy. Your account stays.</span></span></button>
         <button class="row tap destructive" data-act="delete-account"><span class="main"><span class="title">Delete Account</span><span class="subtitle">Erases @${esc(app.account)} from the cloud</span></span></button>`
         : `<button class="row tap destructive" data-act="forget"><span class="main"><span class="title">Forget This Device</span><span class="subtitle">Removes the encrypted copy and token from this browser</span></span></button>`}
-      </div>
+      </div>`}
       <p class="list-foot">${app.env ? `Vault revision ${app.env.rev} · saved ${esc(new Date(app.env.savedAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }))}<br>` : ''}AES-256-GCM · PBKDF2-SHA-256 × ${(app.env?.kdf?.iterations || crypto.KDF_ITERATIONS).toLocaleString('en-CA')}</p>`);
   };
   draw();
@@ -85,6 +85,7 @@ export function openSettings() {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (!act) return;
     haptic();
+    if (app.demo && ['signout', 'delete-account', 'forget', 'push', 'sync', 'migrate', 'recovery', 'passphrase', 'bio'].includes(act)) { toast('Not available with sample data', { icon: 'sparkle', color: 'indigo' }); return; }
     if (act === 'push') { await saveToRepo(); draw(); }
     if (act === 'sync') { await app.syncNow(); draw(); }
     if (act === 'invite') openInvite();
@@ -313,7 +314,7 @@ function changePassphrase() {
       // Cloud accounts: re-key, then upload first, so the server and this device never disagree.
       let res;
       try {
-        res = await cloud.setPassphrase({ username: app.account, oldToken: app.vault.sync.token, vault: app.vault, env: app.env, baseRev: store.syncedRev(app.account), passphrase: g('#cp1') });
+        res = await cloud.setPassphrase({ username: app.account, oldToken: app.vault.sync.token, vault: app.vault, env: app.env, baseRev: store.syncedRev(app.account), passphrase: g('#cp1'), newRecoveryKey: true });
       } catch (ex) {
         haptic('error');
         err.textContent = ex.code === 'conflict' ? 'Another device saved changes. Sync first, then try again.' : ex.code === 'offline' ? 'Changing the passphrase needs an internet connection.' : 'Couldn’t change the passphrase. Try again.';
@@ -331,6 +332,8 @@ function changePassphrase() {
       sheet.close();
       app.rerender();
       toast(hadBio ? `Passphrase changed everywhere. Turn ${bio.label()} back on in Settings.` : 'Passphrase changed on all your devices.', { icon: 'key', color: 'blue' });
+      // The old recovery key stopped working with the change: show the new one to save.
+      openRecovery(null, { fresh: true });
       return;
     }
     const token = await store.getToken(app.session);
@@ -530,16 +533,19 @@ function openRecovery(onDone, { fresh = false } = {}) {
         haptic('error'); err.textContent = 'Incorrect passphrase.'; btn.disabled = false; btn.textContent = label; return;
       }
       try {
-        const code = await cloud.enableRecovery({ username: app.account, token: app.vault.sync.token, bits });
-        app.vault.recovery = { code, createdAt: new Date().toISOString() };
-        await app.commit({ silent: true });
+        const r = await cloud.enableRecovery({ username: app.account, token: app.vault.sync.token, bits, vault: app.vault, env: app.env, session: app.session, baseRev: store.syncedRev(app.account) });
+        app.vault = r.vault;
+        app.env = r.env;
+        store.saveAccountEnv(app.account, r.env);
+        store.setSynced(app.account, r.env.rev);
+        app.rerender();
         haptic('success');
         fresh = true;
         draw();
         onDone?.();
       } catch (ex) {
         haptic('error');
-        err.textContent = ex.code === 'offline' ? 'This needs an internet connection.' : 'Couldn’t save the recovery key. Try again.';
+        err.textContent = ex.code === 'offline' ? 'This needs an internet connection.' : ex.code === 'conflict' ? 'Another device saved changes. Sync first, then try again.' : 'Couldn’t save the recovery key. Try again.';
         btn.disabled = false; btn.textContent = label;
       } finally { bits.fill(0); }
     });

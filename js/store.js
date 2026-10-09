@@ -62,6 +62,10 @@ export function loadAccountEnv(u) {
   try { const j = JSON.parse(ls.get(`money.vault@${u}`) || 'null'); return isEnvelope(j) ? j : null; } catch { return null; }
 }
 export const saveAccountEnv = (u, env) => ls.set(`money.vault@${u}`, JSON.stringify(env));
+/** Edits made on this device that never reached the cloud (kept when the key changed elsewhere). */
+export function stashUnsynced(u, env) { ls.set(`money.unsynced@${u}`, JSON.stringify(env)); }
+export function unsynced(u) { try { return JSON.parse(ls.get(`money.unsynced@${u}`) || 'null'); } catch { return null; } }
+export function clearUnsynced(u) { ls.del(`money.unsynced@${u}`); }
 export function dropAccountEnv(u) { ['vault', 'synced', 'syncedAt'].forEach((k) => ls.del(`money.${k}@${u}`)); }
 export const syncedRev = (u) => Number(ls.get(`money.synced@${u}`) || 0);
 export function setSynced(u, rev) { ls.set(`money.synced@${u}`, String(rev)); ls.set(`money.syncedAt@${u}`, new Date().toISOString()); }

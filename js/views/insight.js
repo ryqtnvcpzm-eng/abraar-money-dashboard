@@ -157,12 +157,18 @@ function trend(card, ctx) {
       }))}
       <p class="note" style="margin:8px 0 0">Touch and drag to see any day.</p></div>
     ${stats([['Now', m0(last.bal), dateLabel(last.date, 'short')], ['Low', m0(low.bal), dateLabel(low.date, 'short')], ['High', m0(high.bal), dateLabel(high.date, 'short')]])}
-    <div class="list-head"><span>Month-end balance</span></div>
-    <div class="list">${months.slice().reverse().map(({ s, prev }) => {
-      const d = prev ? s.closing - prev.closing : s.closing - s.opening;
+    ${(() => {
+      // Only months whose statement printed a closing balance (CSV downloads without balances have none).
+      const rows = months.filter(({ s }) => s.closing != null).reverse();
+      if (!rows.length) return '<p class="list-foot">Your files don’t include balances, so this shows money in minus money out over time.</p>';
+      return `<div class="list-head"><span>Month-end balance</span></div>
+    <div class="list">${rows.map(({ s, prev }) => {
+      const base = prev?.closing ?? s.opening;
+      const d = base != null ? s.closing - base : null;
       return `<div class="row"><span class="main"><span class="title">${esc(monthLabel(s.id))}</span></span>
-        <span><span class="value">${money(s.closing)}</span><span class="value-sub ${d >= 0 ? 'pos' : 'neg'}">${money(d, { sign: true })}</span></span></div>`;
+        <span><span class="value">${money(s.closing)}</span>${d != null ? `<span class="value-sub ${d >= 0 ? 'pos' : 'neg'}">${money(d, { sign: true })}</span>` : ''}</span></div>`;
     }).join('')}</div>`;
+    })()}`;
 }
 
 // ---------- A category that moved ----------

@@ -16,6 +16,7 @@ import { parseGenericStatement } from '../js/generic-parser.js';
 import { readStatementFile, parseLoaded, loadFile } from '../js/statements.js';
 import { FIXTURES } from './fixtures-generic.mjs';
 import { EXPORTS } from './fixtures-exports.mjs';
+import { WORLD_TXNS } from './fixtures-categories.mjs';
 
 let passed = 0;
 const failures = [];
@@ -72,6 +73,29 @@ await test('rules categorize common merchants', () => {
   assert.equal(c('SERVICE CHARGE DISCOUNT', 6.95), 'fees');
   assert.equal(c('VISA DEBIT PURCHASE UBER *EATS PENDING'), 'dining');
   assert.equal(c('CARD PAYMENT TO JOE S KITCHEN'), 'dining');
+});
+await test(`categories for banks around the world (${WORLD_TXNS.length} descriptions)`, () => {
+  const wrong = WORLD_TXNS.filter(([d, a, want]) => categorize({ merchant: d, amount: a }, compiled, []).category !== want);
+  assert.equal(wrong.length, 0, wrong.map(([d, , w]) => `${d} → expected ${w}`).join('; '));
+});
+await test('merchant names are cleaned for other banks too', () => {
+  assert.equal(cleanName('CARD PAYMENT TO TESCO STORES 3021 ON 14 MAR'), 'Tesco Stores');
+  assert.equal(cleanName('CARD PURCHASE 03/14 STARBUCKS STORE 12345 SEATTLE WA'), 'Starbucks Store');
+  assert.equal(cleanName('ACHAT CB CARREFOUR MARKET 12/03 PARIS'), 'Carrefour Market');
+  assert.equal(cleanName('UPI/412345678901/SWIGGY/swiggy@icici'), 'Swiggy');
+  assert.equal(cleanName('EFTPOS WOOLWORTHS 1234 SYDNEY'), 'Woolworths');
+  assert.equal(cleanName('PNP PICK N PAY'), 'Pnp Pick N Pay');
+  assert.equal(cleanName('RETAIL PURCHASE ATELIER PARIS D'), 'Atelier Paris');
+});
+await test('merchant category codes, foreign currency and learned places', () => {
+  const c = (merchant, amount = -5, rules = [], home = 'CAD') => categorize({ merchant, amount }, compiled, rules, home).category;
+  assert.equal(c('PURCHASE MCC 5812 SOME LOCAL PLACE'), 'dining');
+  assert.equal(c('INTL VISA DEB RETAIL PURCHASE JR CENTRAL 3000 JPY @ 0.0092'), 'travel');
+  assert.equal(c('JR CENTRAL', -30, [], 'JPY'), 'transport');
+  assert.equal(c('INTEREST CHARGED ON PURCHASES', -12), 'fees');
+  // Teaching "Blue Heron" once covers its other branches.
+  assert.equal(c('RETAIL PURCHASE BLUE HERON MAIN ST', -9, [{ name: 'Blue Heron', category: 'coffee', sign: -1 }]), 'coffee');
+  assert.equal(c('RETAIL PURCHASE CAFE OLIMPICO', -4, [{ name: 'Cafe', category: 'dining', sign: -1 }]), 'coffee');
 });
 await test('user rules beat rules.json, and locked choices beat both', () => {
   const t = { merchant: 'RETAIL PURCHASE COUCHE-TARD #2', amount: -3 };
@@ -174,6 +198,20 @@ for (const f of EXPORTS) {
     assert.ok(!/\d{6,}/.test(JSON.stringify(vault.transactions.map((t) => t.merchant))), 'no account-like numbers stored');
   });
 }
+await test('re-importing part of a month never deletes the rest', () => {
+  const st = (start, end, rows) => ({ period: { start, end }, opening: null, closing: null, summaryTotals: {}, transactions: rows.map(([date, description, amount]) => ({ date, description, amount })), balanceIssues: [], warnings: [], meta: { format: 'csv', unverified: true } });
+  const v = emptyVault();
+  // A statement period that crosses months (Dec 16 – Jan 15), then a CSV of all of December and January.
+  commitImport(v, prepareImport(v, st('2025-12-16', '2026-01-15', [['2025-12-20', 'GROCERY MART', -40], ['2026-01-10', 'COFFEE SPOT', -4]]), compiled));
+  for (const s of [st('2025-12-01', '2025-12-31', [['2025-12-05', 'BOOKSHOP', -12], ['2025-12-20', 'GROCERY MART', -40]]), st('2026-01-01', '2026-01-31', [['2026-01-10', 'COFFEE SPOT', -4], ['2026-01-25', 'PHARMACY', -9]])]) commitImport(v, prepareImport(v, s, compiled));
+  assert.deepEqual(v.transactions.map((t) => t.date).sort(), ['2025-12-05', '2025-12-20', '2026-01-10', '2026-01-25']);
+  // Two downloads covering different parts of the same month both stay.
+  const w = emptyVault();
+  commitImport(w, prepareImport(w, st('2026-03-02', '2026-03-10', [['2026-03-03', 'A SHOP', -1], ['2026-03-09', 'B SHOP', -2]]), compiled));
+  commitImport(w, prepareImport(w, st('2026-03-16', '2026-03-28', [['2026-03-17', 'C SHOP', -3]]), compiled));
+  assert.equal(w.transactions.length, 3);
+  assert.deepEqual([w.statements[0].start, w.statements[0].end, w.statements[0].count], ['2026-03-02', '2026-03-28', 3]);
+});
 await test('a scanned PDF (no text) gets a helpful message', async () => {
   const fakePdf = { getDocument: () => ({ promise: Promise.resolve({ numPages: 1, getPage: async () => ({ getTextContent: async () => ({ items: [] }), cleanup() {} }) }), destroy: async () => {} }) };
   await assert.rejects(loadFile({ name: 'scan.pdf', bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]) }, { pdfjs: fakePdf }), /scanned image/);

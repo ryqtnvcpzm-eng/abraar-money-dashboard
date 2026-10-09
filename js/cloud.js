@@ -47,14 +47,26 @@ export async function tokenFromBits(bits) {
 }
 export async function hashToken(token) { return hex(await subtle.digest('SHA-256', enc.encode(token))); }
 
+/**
+ * Never derive a key with settings weaker than our own: a tampered server could otherwise ask for
+ * one iteration and get a token cheap enough to brute-force the passphrase from.
+ */
+function checkKdf(salt, iterations) {
+  let bytes = 0;
+  try { bytes = unb64(salt).length; } catch { /* invalid */ }
+  if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > 10_000_000 || bytes < 16 || bytes > 64) throw new CloudError('bad_server_kdf', 0);
+}
+
 /** Derive session + token from a passphrase and KDF params. Wipes the raw bytes unless `keepBits`. */
 export async function deriveAccess(passphrase, salt, iterations, { keepBits = false } = {}) {
+  checkKdf(salt, iterations);
   const bits = await deriveKeyBits(passphrase, unb64(salt), iterations);
   try {
     return { ...(await accessFromBits(bits, salt, iterations)), ...(keepBits ? { bits } : {}) };
   } finally { if (!keepBits) bits.fill(0); }
 }
 async function accessFromBits(bits, salt, iterations) {
+  checkKdf(salt, iterations);
   return { session: { key: await keyFromBits(bits), salt, iterations }, token: await tokenFromBits(bits) };
 }
 
@@ -130,24 +142,32 @@ export async function openWithBits(username, bits) {
  * Set a new passphrase for an open account (after a reset, or from Settings). Re-encrypts with a
  * fresh salt, keeps the recovery key working, and uploads with the old token in one step.
  */
-export async function setPassphrase({ username, oldToken, vault, env, baseRev, passphrase }) {
+export async function setPassphrase({ username, oldToken, vault, env, baseRev, passphrase, newRecoveryKey: rotate = false }) {
   const salt = b64(randomBytes(16));
   const access = await deriveAccess(passphrase, salt, KDF_ITERATIONS, { keepBits: true });
   try {
-    const next = { ...vault, sync: { ...(vault.sync || {}), mode: 'cloud', username, token: access.token } };
-    const recovery = vault.recovery?.code ? await wrapRecovery(vault.recovery.code, username, access.bits) : null;
+    // Changing the passphrase on purpose also replaces the recovery key: anyone who could open the
+    // vault before (and so could read the old key inside it) is locked out too.
+    const code = rotate || !vault.recovery?.code ? newRecoveryKey() : vault.recovery.code;
+    const recovery = { code, createdAt: code === vault.recovery?.code ? vault.recovery.createdAt : new Date().toISOString() };
+    const next = { ...vault, recovery, sync: { ...(vault.sync || {}), mode: 'cloud', username, token: access.token } };
     const nextEnv = await seal(access.session, next, (env.rev || 0) + 1);
-    await push(username, oldToken, nextEnv, baseRev, { newToken: access.token, recovery });
-    return { session: access.session, token: access.token, env: nextEnv, vault: next };
+    await push(username, oldToken, nextEnv, baseRev, { newToken: access.token, recovery: await wrapRecovery(code, username, access.bits) });
+    return { session: access.session, token: access.token, env: nextEnv, vault: next, recoveryKey: code, rotated: code !== vault.recovery?.code };
   } finally { access.bits.fill(0); }
 }
 
-/** Turn on (or replace) the recovery key. Needs the raw key bytes, so the caller asks for the passphrase. */
-export async function enableRecovery({ username, token, bits }) {
+/**
+ * Turn on (or replace) the recovery key. Needs the raw key bytes, so the caller asks for the passphrase.
+ * The new key goes into the vault and its wrapped copy to the server in one compare-and-swap write,
+ * so they can never disagree.
+ */
+export async function enableRecovery({ username, token, bits, vault, env, session, baseRev }) {
   const code = newRecoveryKey();
-  const blob = await wrapRecovery(code, username, bits);
-  await call('PUT', `accounts/${encodeURIComponent(username)}/recovery`, { token, body: { recovery: blob } });
-  return code;
+  const next = { ...vault, recovery: { code, createdAt: new Date().toISOString() } };
+  const nextEnv = await seal(session, next, (env.rev || 0) + 1);
+  await push(username, token, nextEnv, baseRev, { recovery: await wrapRecovery(code, username, bits) });
+  return { code, vault: next, env: nextEnv };
 }
 
 /** Sign in on a device that has nothing yet: fetch KDF params, derive, download, decrypt. */

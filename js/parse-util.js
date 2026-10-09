@@ -103,16 +103,18 @@ export function resolveOrder(dates, hint = null) {
   // Neither decides: pick the order that keeps the dates in sequence more often.
   const amb = dates.filter((x) => x && x.ambiguous);
   if (amb.length > 1) {
-    const score = (order) => {
+    const score = (order, dir) => {
       let s = 0;
       for (let i = 1; i < amb.length; i++) {
         const k = (x) => (order === 'dmy' ? x.b * 40 + x.a : x.a * 40 + x.b);
-        const d = k(amb[i]) - k(amb[i - 1]);
+        const d = (k(amb[i]) - k(amb[i - 1])) * dir;
         if (d >= 0 && d < 80) s++;
       }
       return s;
     };
-    const sd = score('dmy'), sm = score('mdy');
+    // Statements can run newest-first, so a steady run in either direction counts.
+    const both = (order) => Math.max(score(order, 1), score(order, -1));
+    const sd = both('dmy'), sm = both('mdy');
     if (sd !== sm) return { order: sd > sm ? 'dmy' : 'mdy', certain: false };
   }
   return { order: 'dmy', certain: false };
@@ -145,21 +147,29 @@ export const AMOUNT_TOKEN = new RegExp(
 /** Amounts at the end of a longer text cell ("COFFEE 4.50" or "COFFEE 4.50 1,234.56"). */
 const TRAILING_AMOUNT = new RegExp(`(?:^|\\s)(\\(?${SIGN}?\\s?(?:${CUR_SYM}\\s?)?${SIGN}?(?:${NUM})\\)?${SIGN}?(?:\\s?(?:CR|DR|Cr|Dr))?)$`);
 
-export const isAmountToken = (s) => {
+const INT_NUM = "\\d{1,3}(?:[,.\\u00a0\\u202f '’]\\d{3})+";
+/** Whole amounts for currencies without cents: "12,000", "-1.250.000", "¥4,990", "₩ 30000". */
+const AMOUNT_TOKEN_INT = new RegExp(
+  `^\\(?${SIGN}?\\s?(?:(?:${CUR_SYM})\\s?${SIGN}?\\s?(?:${INT_NUM}|\\d+)|${INT_NUM})\\s?(?:${CUR_SYM})?\\)?\\s?${SIGN}?\\s?(?:CR|DR|Cr|Dr)?$`,
+);
+export const isAmountToken = (s, zero = false) => {
   const t = String(s).trim();
-  return t.length > 0 && t.length < 40 && AMOUNT_TOKEN.test(t) && !/^\d{1,2}[.]\d{2}[.]/.test(t);
+  if (!t || t.length >= 40) return false;
+  if (AMOUNT_TOKEN.test(t) && !/^\d{1,2}[.]\d{2}[.]/.test(t)) return true;
+  return zero && AMOUNT_TOKEN_INT.test(t);
 };
 
+const TRAILING_INT = new RegExp(`(?:^|\\s)(\\(?${SIGN}?\\s?(?:${CUR_SYM}\\s?)?${SIGN}?(?:${INT_NUM})\\)?${SIGN}?)$`);
 /** Split trailing amounts off a text cell: returns { text, amounts: [string] }. */
-export function splitTrailingAmounts(text) {
+export function splitTrailingAmounts(text, zero = false) {
   let t = String(text).trim();
   const amounts = [];
   for (let k = 0; k < 3; k++) {
-    const m = TRAILING_AMOUNT.exec(t);
+    const m = TRAILING_AMOUNT.exec(t) || (zero ? TRAILING_INT.exec(t) : null);
     if (!m) break;
     const before = t.slice(0, m.index).trim();
     // Don't eat a date ("12.05") or a year-ish number that belongs to the text.
-    if (!before && amounts.length === 0 && !isAmountToken(m[1])) break;
+    if (!before && amounts.length === 0 && !isAmountToken(m[1], zero)) break;
     amounts.unshift(m[1].trim());
     t = before;
   }
@@ -184,7 +194,7 @@ export function detectDecimal(tokens) {
  *   marker  'minus' | 'paren' | 'dr' | 'cr' | 'plus' | null  — what the text itself says
  *   explicit -1 / +1 / 0, reading the marker the way a bank account does (DR and minus are money out)
  */
-export function parseMoney(raw, decimal = '.') {
+export function parseMoney(raw, decimal = '.', { zero = false } = {}) {
   let s = String(raw).trim();
   if (!s) return null;
   let marker = null;
@@ -198,8 +208,11 @@ export function parseMoney(raw, decimal = '.') {
   else if (/^\s*[-−–]|[-−–]\s*$/.test(s) || /^[^\d]*[-−–]\s?\d/.test(s)) marker = 'minus';
   else if (/^\s*\+/.test(s) && !marker) marker = 'plus';
   let n = s.replace(/[^\d.,]/g, '');
+  if (zero && !/[.,]\d{2}$/.test(n)) n = n.replace(/[.,]/g, ''); // no cents: every separator groups thousands
   // A lone separator followed by two digits is the decimal point, whatever the document guess was.
   let dec = decimal;
+  // "1,200" or "12,345,678": three digits after every comma is grouping, not cents, even in comma-decimal files.
+  if (dec === ',' && /^\d{1,3}(,\d{3})+$/.test(n)) dec = '.';
   if (/^\d+,\d{2}$/.test(n)) dec = ',';
   if (/^\d+\.\d{2}$/.test(n)) dec = '.';
   n = dec === ',' ? n.replace(/\./g, '').replace(',', '.') : n.replace(/,/g, '');
@@ -236,19 +249,27 @@ export function parseLoose(raw, decimal = '.') {
 const SYMBOL_CURRENCY = [['€', 'EUR'], ['£', 'GBP'], ['₹', 'INR'], ['¥', 'JPY'], ['₩', 'KRW'], ['₦', 'NGN'], ['₱', 'PHP'], ['₫', 'VND'], ['฿', 'THB'], ['₺', 'TRY'], ['₪', 'ILS'], ['₴', 'UAH'], ['R$', 'BRL'], ['zł', 'PLN'], ['Kč', 'CZK']];
 const CODES = 'CAD USD EUR GBP AUD NZD INR JPY CNY HKD SGD CHF SEK NOK DKK ZAR MXN BRL AED SAR PKR BDT LKR NGN KES GHS EGP MAD TRY PLN CZK HUF RON ILS KRW PHP THB MYR IDR VND TWD ARS CLP COP PEN QAR KWD BHD OMR JOD'.split(' ');
 
-/** Best guess at the statement's currency (ISO code), or null. */
+/** Currencies with no cents: amounts like "12,000" or "¥4,990". */
+export const ZERO_DECIMAL = new Set(['JPY', 'KRW', 'VND', 'IDR', 'CLP', 'ISK', 'UGX', 'PYG', 'XOF', 'XAF', 'HUF', 'COP', 'TWD']);
+
+/**
+ * Best guess at the statement's currency (ISO code), or null. Codes only count next to a number
+ * ("EUR 12,00", "45.00 USD") or alone in a header, so a merchant like "MAD MEX" isn't Moroccan dirham.
+ * A bare "$" is ambiguous (many dollars), so it never decides on its own.
+ */
 export function detectCurrency(text) {
   const t = String(text);
   const counts = new Map();
   const bump = (c, n = 1) => counts.set(c, (counts.get(c) || 0) + n);
   for (const c of CODES) {
-    const n = (t.match(new RegExp(`\\b${c}\\b`, 'g')) || []).length;
+    const n = (t.match(new RegExp(`\\b${c}\\s?[-−(]?\\d|(?:\\d[.,]\\d{2}|\\d{1,3}[,.]\\d{3})\\s?${c}\\b|\\(${c}\\)|\\b(?:currency|devise|moneda|w(?:ä|ae)hrung|valuta)\\W{0,3}${c}\\b`, 'gi')) || []).length;
     if (n) bump(c, n * 2);
   }
   for (const [sym, c] of SYMBOL_CURRENCY) { const n = t.split(sym).length - 1; if (n) bump(c, n); }
   if (/\b(CA\$|C\$)/.test(t)) bump('CAD', 3);
   if (/\bUS\$/.test(t)) bump('USD', 3);
   if (/\bA\$/.test(t)) bump('AUD', 3);
+  if (/\bRp\s?\d/.test(t)) bump('IDR', 3);
   let best = null;
   for (const [c, n] of counts) if (!best || n > best[1]) best = [c, n];
   return best ? best[0] : null;

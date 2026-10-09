@@ -86,10 +86,21 @@ await test('changing the passphrase re-keys the account', async () => {
   await rejects(cloud.pull('abraar', A.token), 'unauthorized');
   assert.equal((await cloud.signIn('abraar', 'new strong passphrase words')).env.rev, 6);
 });
-await test('repeated wrong guesses are throttled', async () => {
-  for (let i = 0; i < 10; i++) { try { await cloud.pull('brother', 'bogus-token'); } catch { /* expected */ } }
-  await rejects(cloud.pull('brother', B.token), 'too_many_attempts');
+await test('repeated wrong guesses are throttled, but a stranger can’t lock the owner out', async () => {
+  const from = (ip, token) => worker.fetch(new Request('https://money.test/api/v1/accounts/brother/vault', { headers: { Authorization: `Bearer ${token}`, 'CF-Connecting-IP': ip } }), env);
+  const results = await Promise.all(Array.from({ length: 14 }, () => from('203.0.113.9', 'bogus-token')));
+  assert.ok(results.some((r) => r.status === 429), 'parallel guesses hit the limit');
+  assert.equal((await from('203.0.113.9', B.token)).status, 429, 'the guessing network stays blocked');
+  assert.equal((await from('198.51.100.7', B.token)).status, 200, 'the owner elsewhere still gets in');
   await env.DB.prepare('DELETE FROM failures').run();
+});
+await test('a forced save must move the revision forward', async () => {
+  const cur = await cloud.pull('brother', B.token);
+  const older = await seal(B.session, { ...emptyVault(), sync: { username: 'brother', token: B.token } }, Math.max(1, cur.rev - 1));
+  await rejects(cloud.push('brother', B.token, older, cur.rev, { force: true }), 'conflict');
+});
+await test('a client refuses weak key settings from the server', async () => {
+  await rejects(cloud.deriveAccess('whatever passphrase', 'AAAAAAAAAAAAAAAAAAAAAA==', 1), 'bad_server_kdf');
 });
 await test('cross-site writes are rejected', async () => {
   const r = await worker.fetch(new Request('https://money.test/api/v1/accounts', { method: 'POST', headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' }), env);
@@ -148,9 +159,34 @@ await test('a new recovery key replaces the old one', async () => {
   const { deriveKeyBits, unb64 } = await import('../js/crypto.js');
   const r = await cloud.signIn('sis', 'violet harbor sleepy comet');
   const bits = await deriveKeyBits('violet harbor sleepy comet', unb64(r.env.kdf.salt), r.env.kdf.iterations);
-  const code = await cloud.enableRecovery({ username: 'sis', token: r.token, bits });
+  const { code } = await cloud.enableRecovery({ username: 'sis', token: r.token, bits, vault: r.vault, env: r.env, session: r.session, baseRev: r.env.rev });
+  assert.equal((await cloud.signIn('sis', 'violet harbor sleepy comet')).vault.recovery.code, code, 'vault and server agree');
   await rejects(cloud.recoverWithKey('sis', S.recoveryKey), 'wrong_recovery_key');
   assert.equal((await cloud.recoverWithKey('sis', code)).token, r.token);
+});
+await test('changing the passphrase in Settings replaces the recovery key', async () => {
+  const r = await cloud.signIn('sis', 'violet harbor sleepy comet');
+  const old = r.vault.recovery.code;
+  const res = await cloud.setPassphrase({ username: 'sis', oldToken: r.token, vault: r.vault, env: r.env, baseRev: r.env.rev, passphrase: 'quiet meadow amber kite', newRecoveryKey: true });
+  assert.notEqual(res.recoveryKey, old);
+  await rejects(cloud.recoverWithKey('sis', old), 'wrong_recovery_key');
+  assert.equal((await cloud.recoverWithKey('sis', res.recoveryKey)).token, res.token);
+  // Put it back for the next test.
+  await cloud.setPassphrase({ username: 'sis', oldToken: res.token, vault: res.vault, env: res.env, baseRev: res.env.rev, passphrase: 'violet harbor sleepy comet' });
+});
+await test('a slow request made with the old key can’t undo a passphrase change', async () => {
+  const r = await cloud.signIn('sis', 'violet harbor sleepy comet');
+  const oldHash = (await env.DB.prepare('SELECT auth_hash FROM accounts WHERE username = ?').bind('sis').first()).auth_hash;
+  const res = await cloud.setPassphrase({ username: 'sis', oldToken: r.token, vault: r.vault, env: r.env, baseRev: r.env.rev, passphrase: 'brand new words here ok' });
+  // Simulate the race: an UPDATE authorised under the old hash arriving after the change.
+  const stale = await env.DB.prepare('UPDATE accounts SET rev = 999 WHERE username = ? AND auth_hash = ?').bind('sis', oldHash).run();
+  assert.equal(stale.meta.changes, 0);
+  assert.equal((await cloud.signIn('sis', 'brand new words here ok')).token, res.token);
+  await cloud.setPassphrase({ username: 'sis', oldToken: res.token, vault: res.vault, env: res.env, baseRev: res.env.rev, passphrase: 'violet harbor sleepy comet' });
+});
+await test('a malformed username escape is a clean 400', async () => {
+  const r = await worker.fetch(new Request('https://money.test/api/v1/accounts/%E0%A4%A/kdf'), env);
+  assert.equal(r.status, 400);
 });
 await test('a passphrase change that can’t re-wrap the key drops the stale recovery blob', async () => {
   const r = await cloud.signIn('sis', 'violet harbor sleepy comet');

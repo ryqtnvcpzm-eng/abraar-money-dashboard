@@ -31,7 +31,8 @@ const HEADERS = {
 };
 const USER_RE = /^[a-z0-9][a-z0-9._-]{2,31}$/;
 const MAX_ENVELOPE = 1_800_000; // D1 rows top out around 2 MB
-const MAX_FAILS = 10; // wrong tokens per account per window
+const MAX_FAILS = 10; // wrong tokens per account from one network, per window
+const MAX_FAILS_ACCOUNT = 300; // wrong tokens per account from everywhere, per window (bounds distributed guessing)
 const FAIL_WINDOW = 15 * 60; // seconds
 const enc = new TextEncoder();
 
@@ -39,6 +40,7 @@ const json = (data, status = 200) => new Response(status === 204 ? null : JSON.s
 const err = (status, error, extra = {}) => json({ error, ...extra }, status);
 
 let schemaReady = false;
+let siteSecret = null;
 async function ensureSchema(db) {
   if (schemaReady) return;
   await db.batch([
@@ -47,7 +49,12 @@ async function ensureSchema(db) {
       envelope TEXT NOT NULL, rev INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`),
     db.prepare('CREATE TABLE IF NOT EXISTS failures (username TEXT PRIMARY KEY, count INTEGER NOT NULL, window_start INTEGER NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS recovery (username TEXT PRIMARY KEY, blob TEXT NOT NULL, updated_at TEXT NOT NULL)'),
+    db.prepare('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)'),
   ]);
+  // A random secret made once per site, for the fake answers about unknown usernames.
+  const fresh = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  await db.prepare('INSERT OR IGNORE INTO meta (k, v) VALUES (?, ?)').bind('site_secret', fresh).run();
+  siteSecret = (await db.prepare('SELECT v FROM meta WHERE k = ?').bind('site_secret').first())?.v || fresh;
   schemaReady = true;
 }
 
@@ -81,7 +88,7 @@ async function body(req) {
 }
 
 async function hmac(env, label, username) {
-  const key = await crypto.subtle.importKey('raw', enc.encode(`money-${label}|${env.INVITE_CODE || 'unset'}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const key = await crypto.subtle.importKey('raw', enc.encode(`money-${label}|${siteSecret || env.INVITE_CODE || 'unset'}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(username)));
 }
 const b64 = (bytes) => btoa(String.fromCharCode(...bytes));
@@ -98,19 +105,37 @@ async function fakeRecovery(env, username) {
   return { v: 1, iv: b64(a.slice(0, 12)), ct: b64(new Uint8Array([...a.slice(12, 32), ...b.slice(0, 28)])) };
 }
 
+/** Count one wrong guess atomically and return the new count for that key. */
+async function bump(db, key, now) {
+  const r = await db.prepare(`INSERT INTO failures (username, count, window_start) VALUES (?1, 1, ?2)
+    ON CONFLICT(username) DO UPDATE SET
+      count = CASE WHEN ?2 - window_start >= ?3 THEN 1 ELSE count + 1 END,
+      window_start = CASE WHEN ?2 - window_start >= ?3 THEN ?2 ELSE window_start END
+    RETURNING count`).bind(key, now, FAIL_WINDOW).first();
+  return r?.count ?? 1;
+}
+
 async function authorize(req, db, username) {
   const now = Math.floor(Date.now() / 1000);
-  const fail = await db.prepare('SELECT count, window_start FROM failures WHERE username = ?').bind(username).first();
-  if (fail && now - fail.window_start < FAIL_WINDOW && fail.count >= MAX_FAILS) return { error: err(429, 'too_many_attempts', { retryAfter: FAIL_WINDOW - (now - fail.window_start) }) };
+  const client = req.headers.get('CF-Connecting-IP') || 'local';
+  const here = `${username}|${client}`;
+  // Throttle wrong guesses per account *and network*: someone else guessing can't lock the owner out.
+  // The attempt is counted atomically *before* the token is checked, so parallel requests can't
+  // all slip in under the limit; a correct token then clears the count.
+  const all = await db.prepare('SELECT count, window_start FROM failures WHERE username = ?').bind(`${username}|*`).first();
+  if (all && now - all.window_start < FAIL_WINDOW && all.count >= MAX_FAILS_ACCOUNT) {
+    return { error: err(429, 'too_many_attempts', { retryAfter: FAIL_WINDOW - (now - all.window_start) }) };
+  }
+  const tries = await bump(db, here, now);
+  if (tries > MAX_FAILS) return { error: err(429, 'too_many_attempts', { retryAfter: FAIL_WINDOW }) };
   const token = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   const row = await db.prepare('SELECT * FROM accounts WHERE username = ?').bind(username).first();
   if (row && token && safeEqual(await sha256hex(token), row.auth_hash)) {
-    if (fail) await db.prepare('DELETE FROM failures WHERE username = ?').bind(username).run();
+    await db.prepare('DELETE FROM failures WHERE username = ?').bind(here).run();
     return { row };
   }
-  // Count failures per username (whether or not it exists, so behaviour is the same).
-  if (!fail || now - fail.window_start >= FAIL_WINDOW) await db.prepare('INSERT OR REPLACE INTO failures (username, count, window_start) VALUES (?, 1, ?)').bind(username, now).run();
-  else await db.prepare('UPDATE failures SET count = count + 1 WHERE username = ?').bind(username).run();
+  // Counted whether or not the account exists, so behaviour is the same.
+  await bump(db, `${username}|*`, now);
   return { error: err(401, 'unauthorized') };
 }
 
@@ -130,16 +155,23 @@ export async function handleApi(req, env, url) {
     if (!validKdf(b.kdf) || !validHash(b.authHash) || !validEnvelope(b.envelope) || b.envelope.kdf.salt !== b.kdf.salt) return err(400, 'bad_request');
     if (b.recovery != null && !validRecovery(b.recovery)) return err(400, 'bad_request');
     const now = new Date().toISOString();
-    const res = await db.prepare('INSERT OR IGNORE INTO accounts (username, salt, iterations, auth_hash, envelope, rev, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .bind(username, b.kdf.salt, b.kdf.iterations, b.authHash, JSON.stringify(b.envelope), b.envelope.rev, now, now).run();
-    if (!res.meta || res.meta.changes !== 1) return err(409, 'username_taken');
-    await setRecovery(db, username, b.recovery || null, now).run();
+    // One batch: the account and its recovery blob are written together or not at all.
+    const [res] = await db.batch([
+      db.prepare('INSERT OR IGNORE INTO accounts (username, salt, iterations, auth_hash, envelope, rev, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(username, b.kdf.salt, b.kdf.iterations, b.authHash, JSON.stringify(b.envelope), b.envelope.rev, now, now),
+      b.recovery
+        ? db.prepare('INSERT OR REPLACE INTO recovery (username, blob, updated_at) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM accounts WHERE username = ? AND auth_hash = ? AND created_at = ?)')
+          .bind(username, JSON.stringify(b.recovery), now, username, b.authHash, now)
+        : db.prepare('SELECT 1'),
+    ]);
+    if (!res?.meta || res.meta.changes !== 1) return err(409, 'username_taken');
     return json({ username, rev: b.envelope.rev }, 201);
   }
 
   const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery)?$/.exec(path);
   if (!m) return err(404, 'not_found');
-  const username = decodeURIComponent(m[1]).toLowerCase();
+  let username;
+  try { username = decodeURIComponent(m[1]).toLowerCase(); } catch { return err(400, 'bad_username'); }
   if (!USER_RE.test(username)) return err(400, 'bad_username');
   const sub = m[2] || '';
 
@@ -167,20 +199,26 @@ export async function handleApi(req, env, url) {
     const kdf = changingKey ? b.kdf : { salt: row.salt, iterations: row.iterations };
     const authHash = changingKey ? b.authHash : row.auth_hash;
     const now = new Date().toISOString();
-    // Compare-and-swap on rev: refuses to overwrite a newer save from another device.
+    // Compare-and-swap on rev, and on the key this request was authorised with: a slow request made
+    // with the old passphrase can't undo a passphrase change that landed in between. A forced write
+    // must still move the revision forward, so other devices pick it up.
     const stmt = b.force
-      ? db.prepare('UPDATE accounts SET envelope = ?, rev = ?, salt = ?, iterations = ?, auth_hash = ?, updated_at = ? WHERE username = ?')
-        .bind(JSON.stringify(b.envelope), b.envelope.rev, kdf.salt, kdf.iterations, authHash, now, username)
-      : db.prepare('UPDATE accounts SET envelope = ?, rev = ?, salt = ?, iterations = ?, auth_hash = ?, updated_at = ? WHERE username = ? AND rev = ?')
-        .bind(JSON.stringify(b.envelope), b.envelope.rev, kdf.salt, kdf.iterations, authHash, now, username, Number(b.baseRev));
-    const res = await stmt.run();
-    if (!res.meta || res.meta.changes !== 1) {
+      ? db.prepare('UPDATE accounts SET envelope = ?, rev = ?, salt = ?, iterations = ?, auth_hash = ?, updated_at = ? WHERE username = ? AND auth_hash = ? AND rev < ?')
+        .bind(JSON.stringify(b.envelope), b.envelope.rev, kdf.salt, kdf.iterations, authHash, now, username, row.auth_hash, b.envelope.rev)
+      : db.prepare('UPDATE accounts SET envelope = ?, rev = ?, salt = ?, iterations = ?, auth_hash = ?, updated_at = ? WHERE username = ? AND auth_hash = ? AND rev = ?')
+        .bind(JSON.stringify(b.envelope), b.envelope.rev, kdf.salt, kdf.iterations, authHash, now, username, row.auth_hash, Number(b.baseRev));
+    // The recovery blob changes in the same batch, and only if the vault write above went through.
+    const applied = 'EXISTS (SELECT 1 FROM accounts WHERE username = ? AND rev = ? AND auth_hash = ? AND updated_at = ?)';
+    const recoveryStmt = 'recovery' in b && b.recovery
+      ? db.prepare(`INSERT OR REPLACE INTO recovery (username, blob, updated_at) SELECT ?, ?, ? WHERE ${applied}`).bind(username, JSON.stringify(b.recovery), now, username, b.envelope.rev, authHash, now)
+      : ('recovery' in b || changingKey)
+        ? db.prepare(`DELETE FROM recovery WHERE username = ? AND ${applied}`).bind(username, username, b.envelope.rev, authHash, now)
+        : db.prepare('SELECT 1');
+    const [res] = await db.batch([stmt, recoveryStmt]);
+    if (!res?.meta || res.meta.changes !== 1) {
       const cur = await db.prepare('SELECT rev FROM accounts WHERE username = ?').bind(username).first();
       return err(409, 'conflict', { rev: cur?.rev });
     }
-    // A new key makes the old recovery blob useless (it wraps the old key): replace or drop it.
-    if ('recovery' in b) await setRecovery(db, username, b.recovery, now).run();
-    else if (changingKey) await setRecovery(db, username, null, now).run();
     return json({ rev: b.envelope.rev, updatedAt: now });
   }
 
@@ -194,7 +232,7 @@ export async function handleApi(req, env, url) {
   if (sub === '' && req.method === 'DELETE') {
     await db.batch([
       db.prepare('DELETE FROM accounts WHERE username = ?').bind(username),
-      db.prepare('DELETE FROM failures WHERE username = ?').bind(username),
+      db.prepare("DELETE FROM failures WHERE username LIKE ? ESCAPE '\\'").bind(`${username.replace(/[%_\\]/g, '\\$&')}|%`),
       db.prepare('DELETE FROM recovery WHERE username = ?').bind(username),
     ]);
     return json(null, 204);

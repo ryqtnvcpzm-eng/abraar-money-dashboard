@@ -23,24 +23,31 @@ export function openImporter({ welcome = false } = {}) {
   const sheet = openSheet({ title: 'Add Statements', size: 'full', body: '' });
   const statements = () => files.flatMap((f, fi) => (f.status === 'ready' ? f.statements.map((s, si) => ({ ...s, f, fi, si })) : []));
 
+  const reconcileOf = (x) => x.f.statements[x.si].parsed && x.f.statements[x.si].prep?.reconciliation?.ok;
+  const covers = (a, b) => a && b && a.start <= b.start && a.end >= b.end;
   /** Re-check every statement against the vault and against each other (duplicates across files). */
   function prepareAll() {
     const work = structuredClone(app.vault);
-    const list = statements().sort((a, b) => (a.parsed.period.end < b.parsed.period.end ? -1 : 1));
-    const seen = new Set();
+    // Per month, a statement that reconciles goes first, so it's the one kept when two files cover it.
+    const score = (x) => (x.f.statements[x.si].include === false && x.f.statements[x.si].touched ? 2 : 0) + (reconcileOf(x) === true ? 0 : 1);
+    const list = statements().sort((a, b) => (a.parsed.period.end.slice(0, 7) < b.parsed.period.end.slice(0, 7) ? -1 : a.parsed.period.end.slice(0, 7) > b.parsed.period.end.slice(0, 7) ? 1 : score(a) - score(b)));
+    const seen = new Set(); // statements already added to the working copy
     for (const s of list) {
       const st = s.f.statements[s.si];
       const prep = prepareImport(work, st.parsed, app.rules);
       prep.alreadyImported = app.vault.statements.some((x) => x.id === prep.id);
-      prep.sameBatch = seen.has(prep.id);
-      seen.add(prep.id);
+      // Two files for the same dates (a PDF and a CSV of one month): keep one. Overlapping parts of a month merge.
+      prep.sameBatch = list.some((o) => o !== s && seen.has(o) && o.f.statements[o.si].prep?.id === prep.id && covers(o.parsed.period, prep.period));
       st.prep = prep;
       if (!st.touched) {
         const ok = prep.reconciliation.ok;
         const existing = app.vault.statements.find((x) => x.id === prep.id);
-        st.include = !prep.sameBatch && ok !== false && (!existing || prep.parsedCount >= existing.count);
+        // Re-adding a month only replaces the dates this file covers. Don't let a thinner copy of the same
+        // dates replace a fuller one by default (the person can still switch it on).
+        const thinner = existing && covers(prep.period, existing) && prep.parsedCount < existing.count;
+        st.include = !prep.sameBatch && ok !== false && !thinner;
       }
-      if (st.include && !prep.sameBatch) commitImport(work, prep);
+      if (st.include && !prep.sameBatch) { commitImport(work, prep); seen.add(s); }
     }
   }
 
@@ -121,7 +128,7 @@ export function openImporter({ welcome = false } = {}) {
         ${notes.map((x) => `<div class="row"><span class="main"><span class="subtitle" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
         ${rec.issues.slice(0, 4).map((x) => `<div class="row"><span class="main"><span class="subtitle neg" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
         ${(p.warnings || []).slice(0, 2).map((x) => `<div class="row"><span class="main"><span class="subtitle" style="white-space:normal">${esc(x)}</span></span></div>`).join('')}
-        ${p.sameBatch ? '' : p.alreadyImported ? toggle(key, 'Replace the existing statement', 'Already imported. Replacing keeps your category changes.', s.include)
+        ${p.sameBatch ? '' : p.alreadyImported ? toggle(key, 'Update this month', 'Already imported. Updates the dates this file covers and keeps your category changes.', s.include)
           : rec.ok === false ? toggle(key, 'Import anyway', 'It will be flagged until it reconciles.', s.include)
           : toggle(key, 'Include', rec.ok ? 'Checked against the bank’s balances.' : 'Not checked: no balances in the file.', s.include)}
       </div>`;
@@ -171,10 +178,10 @@ export function openImporter({ welcome = false } = {}) {
       const signsProven = p.reconciliation.ok === true && meta.signSource !== 'keywords';
       rs.setTitle(p.label);
       rs.setBody(`
-        ${!signsProven || meta.dateOrderCertain === false ? `<div class="list-head"><span>If something looks off</span></div><div class="list">
+        ${!signsProven || meta.dateOrderCertain === false || f.options.dateOrder ? `<div class="list-head"><span>If something looks off</span></div><div class="list">
           ${!signsProven ? `<label class="row"><span class="main"><span class="title">Swap money in and out</span><span class="subtitle" style="white-space:normal">Use this if purchases show as money in.</span></span>
             <span class="switch"><input type="checkbox" data-opt="flip" ${f.options.flip ? 'checked' : ''} aria-label="Swap money in and out"><span></span></span></label>` : ''}
-          ${meta.dateOrderCertain === false ? `<label class="row"><span class="main"><span class="title">Month comes first</span><span class="subtitle" style="white-space:normal">For dates like 03/04 meaning March 4. Off means 3 April.</span></span>
+          ${meta.dateOrderCertain === false || f.options.dateOrder ? `<label class="row"><span class="main"><span class="title">Month comes first</span><span class="subtitle" style="white-space:normal">For dates like 03/04 meaning March 4. Off means 3 April.</span></span>
             <span class="switch"><input type="checkbox" data-opt="mdy" ${meta.dateOrder === 'mdy' ? 'checked' : ''} aria-label="Month comes first"><span></span></span></label>` : ''}
         </div>` : ''}
         <div class="list-head"><span>${plural(p.transactions.length, 'transaction')}</span><span>${statusChip(p.reconciliation.ok)}</span></div>

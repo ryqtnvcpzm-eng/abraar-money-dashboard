@@ -75,6 +75,7 @@ const DESC_RANK = [
   ['description', 'transaction description', 'details', 'detail', 'narrative', 'narration', 'particulars', 'libelle', 'libelle operation', 'descripcion', 'concepto', 'beschreibung', 'descrizione', 'descricao', 'historico', 'omschrijving', 'title', 'original description', 'text', 'transaction details', 'transaction'],
   ['memo', 'reference', 'verwendungszweck', 'causale', 'mededelingen', 'remarks'],
 ];
+const EXACT_ANY = new Set(Object.values(H).flat());
 const descRank = (h) => { const i = DESC_RANK.findIndex((g) => g.includes(h)); return i < 0 ? 3 : i; };
 
 function headerMap(row) {
@@ -95,7 +96,8 @@ function headerMap(row) {
       for (let i = 0; i < cells.length; i++) {
         const c = cells[i];
         if (!c || used.has(i)) continue;
-        const hit = exact ? H[role].includes(c) : H[role].some((w) => w.length > 2 && (c.startsWith(w + ' ') || c.endsWith(' ' + w)));
+        // Loose names ("Amount (CHF)") never claim a cell that is exactly another column's name ("Value Date").
+        const hit = exact ? H[role].includes(c) : !EXACT_ANY.has(c) && H[role].some((w) => w.length > 2 && (c.startsWith(w + ' ') || c.endsWith(' ' + w)));
         if (hit) claim(role, i);
       }
     }
@@ -169,8 +171,9 @@ export function parseCsv(text, options = {}) {
     if (amount == null) { skipped++; continue; }
     if (map.type != null) {
       const t = norm(r[map.type] || '');
-      if (/^(d|dr|debit|debito|af|s|soll|withdrawal|out|sale|purchase|payment out)\b/.test(t)) amount = -Math.abs(amount);
-      else if (/^(c|cr|credit|credito|bij|h|haben|deposit|in|refund)\b/.test(t)) amount = Math.abs(amount);
+      // Whole values only: a type like "Credit Card Payment" says nothing about the direction.
+      if (/^(d|dr|debit|debito|af|s|soll|withdrawal|out|sale|purchase|payment out)$/.test(t)) amount = -Math.abs(amount);
+      else if (/^(c|cr|credit|credito|bij|h|haben|deposit|in|refund)$/.test(t)) amount = Math.abs(amount);
     }
     const bal = map.balance != null ? parseLoose(r[map.balance], decimal) : null;
     out.push({ date: isoDate(d.y, d.m, d.d), description: desc || '(no description)', amount: round2(amount), balance: bal ? round2(bal.value) : null, row: i });
@@ -191,11 +194,22 @@ function inferColumns(rows) {
     const filled = vals.filter(Boolean);
     if (filled.length < sample.length * 0.1) continue;
     if (date == null && filled.filter((v) => scanDate(v, { compact: true })).length > filled.length * 0.7) { date = c; continue; }
-    if (filled.filter(isNum).length > filled.length * 0.8) nums.push({ c, fill: filled.length / sample.length });
+    if (filled.filter(isNum).length <= filled.length * 0.8) continue;
+    // Whole numbers that are all different (reference numbers, IDs) aren't money.
+    const withCents = filled.filter((v) => /[.,]\d{1,2}\)?\s*$/.test(v) || /^[-−(]/.test(v)).length;
+    if (withCents < filled.length * 0.3 && new Set(filled).size === filled.length) continue;
+    nums.push({ c, fill: filled.length / sample.length, rows: new Set(vals.map((v, i) => (v ? i : -1)).filter((i) => i >= 0)) });
   }
   if (date == null || !nums.length) return null;
-  // Three number columns, two of them half-empty: debit / credit / balance (common in Canada and India).
-  if (nums.length >= 3 && nums[0].fill < 0.95 && nums[1].fill < 0.95) return { date, debit: nums[0].c, credit: nums[1].c, balance: nums[nums.length - 1].c };
+  // Two half-empty columns that are never filled on the same row: withdrawals and deposits.
+  for (let i = 0; i + 1 < nums.length; i++) {
+    const a = nums[i], b = nums[i + 1];
+    const overlap = [...a.rows].filter((r) => b.rows.has(r)).length;
+    if (a.fill < 0.95 && b.fill < 0.95 && overlap <= Math.min(a.rows.size, b.rows.size) * 0.05) {
+      const rest = nums.slice(i + 2);
+      return { date, debit: a.c, credit: b.c, ...(rest.length ? { balance: rest[rest.length - 1].c } : {}) };
+    }
+  }
   if (nums.length >= 2) return { date, amount: nums[0].c, balance: nums[nums.length - 1].c };
   return { date, amount: nums[0].c };
 }
@@ -216,6 +230,19 @@ const ofxNum = (s) => (s == null ? null : Number(String(s).replace(',', '.')));
 const unescapeXml = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
 
 export function parseOfx(text, options = {}) {
+  // A file can hold several accounts (chequing + savings): read each and import the one with the most activity.
+  const parts = text.split(/<(?=(?:STMTRS|CCSTMTRS)>)/i).slice(1).map((p) => '<' + p);
+  if (parts.length > 1) {
+    const read = parts.map((p) => { try { return parseOfxAccount(p, options); } catch { return null; } }).filter(Boolean);
+    if (!read.length) throw new Error('No transactions found in this OFX file.');
+    read.sort((a, b) => b.transactions.length - a.transactions.length);
+    read[0].warnings.push(`This file has ${read.length} accounts. Imported the one with the most transactions (${read[0].transactions.length}); export the others separately if you want them.`);
+    return read[0];
+  }
+  return parseOfxAccount(text, options);
+}
+
+function parseOfxAccount(text, options = {}) {
   const warnings = [];
   const blocks = text.split(/<STMTTRN>/i).slice(1).map((b) => b.split(/<\/STMTTRN>|<\/BANKTRANLIST>/i)[0]);
   const card = /<CCSTMTRS>|<CREDITCARDMSGSRSV1>/i.test(text);
