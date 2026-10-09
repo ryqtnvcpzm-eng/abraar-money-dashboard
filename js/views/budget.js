@@ -1,9 +1,9 @@
-// Plan: budget from the new job's start date. Step through every month: activity rings
-// (Saved, Spent, Eating out), budget vs actual per line, and a month-by-month history.
+// Budget: from your take-home pay and savings goal (and a start date). Step through every month:
+// activity rings (Saved, Spent, Eating out), budget vs actual per line, and a month-by-month history.
 import { app } from '../state.js';
 import { money, monthLabel, dateLabel, esc, daysInMonth, iso, monthOf, daysBetween } from '../format.js';
 import { planMonths, planMonth, planTargets, planFromTemplate, spendByCategory } from '../ledger.js';
-import { icon, catIcon, pageFrame, wireLargeTitle, haptic, openSheet, toast, alertSheet, segmented, layoutSegmented } from '../ui.js';
+import { icon, catIcon, haptic, openSheet, toast, alertSheet, segmented, layoutSegmented } from '../ui.js';
 import { ringsSVG, animateRings, columnChart } from '../charts.js';
 import { txnRow, openTxn, openCategory } from './sheets.js';
 
@@ -22,39 +22,70 @@ function monthOptions(m) {
 }
 const isFull = (m, ym) => m.statements.some((s) => s.start <= `${ym}-01` && s.end >= `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}`);
 
-export function renderPlan(page) {
+let redrawBudget = null;
+
+/** The budget: rings, every line against its budget, and month by month. Opens over the app. */
+export function openBudget({ ym = null } = {}) {
+  const st = { options: [], idx: 0 };
+  if (ym) app.ui.planMonth = ym;
+  const sheet = openSheet({
+    title: 'Budget', size: 'full',
+    left: app.model.plan ? '<button class="text-btn" data-act="edit" style="font-weight:400">Edit</button>' : '',
+    body: '',
+    onClose: () => { redrawBudget = null; },
+  });
+  const draw = () => {
+    if (!sheet.el.isConnected) return;
+    sheet.setBody(budgetBody(st));
+    layoutSegmented(sheet.el);
+    animateRings(sheet.el.querySelector('#rings'));
+    const pm = st.history;
+    if (pm) drawMetric(sheet.el.querySelector('#plan-chart'), pm, app.ui.planMonth, planTargets(app.model.plan), app.ui.planMetric || 'spent');
+  };
+  redrawBudget = draw;
+  draw();
+  const go = (ym) => { app.ui.planMonth = ym; draw(); };
+  sheet.el.addEventListener('click', (e) => {
+    if (e.target.closest('[data-act="edit"]') || e.target.closest('[data-act="setup"]')) { haptic(); openPlanEditor(); return; }
+    if (e.target.closest('[data-act="apply-layout"]')) { haptic(); applyLayout(); return; }
+    if (e.target.closest('[data-act="months"]')) { haptic(); pickMonth(st.options, draw); return; }
+    const s = e.target.closest('[data-step]');
+    if (s && !s.disabled) { haptic(); go(st.options[st.idx + Number(s.dataset.step)]); return; }
+    const seg = e.target.closest('[data-seg="planMetric"] button');
+    if (seg) { haptic(); app.ui.planMetric = seg.dataset.v; draw(); return; }
+    const line = e.target.closest('[data-line]');
+    if (line) { haptic(); openLine(line.dataset.line); return; }
+    const mo = e.target.closest('[data-month]');
+    if (mo) { haptic(); go(mo.dataset.month); sheet.body.scrollTo({ top: 0, behavior: 'smooth' }); }
+  });
+}
+
+function budgetBody(st) {
   const m = app.model;
   const plan = m.plan;
+  st.history = null;
   if (!plan) {
-    page.innerHTML = pageFrame({ title: 'Plan', body: `<div class="card"><div class="empty">
-      <div class="ic">${icon('rings')}</div><h3>Set up your budget</h3>
-      <p>Tell Money your take-home pay and how much you want to save. It tracks every month from your start date.</p>
-      <button class="btn" data-act="edit" style="max-width:260px">Set Up Plan</button></div></div>` });
-    wireLargeTitle(page);
-    page.onclick = (e) => { if (e.target.closest('[data-act="edit"]')) { haptic(); openPlanEditor(); } };
-    return;
+    return `<div class="sheet-hero" style="padding-top:18px"><span class="cat-icon lg" style="--c:var(--green)">${icon('rings')}</span>
+      <div class="name">Set up your budget</div>
+      <p class="when" style="max-width:340px;margin:8px auto 0">Tell Money your take-home pay and how much you want to save. It splits the rest into a monthly budget and tracks every month: rings, what’s left to spend each day, and how each line is doing.</p></div>
+      <div class="btn-row"><button class="btn" data-act="setup">Set Up Budget</button></div>`;
   }
-
   const t = planTargets(plan);
   const startYm = monthOf(plan.start);
   const today = iso(new Date());
   const started = today >= plan.start;
   const options = monthOptions(m);
+  st.options = options;
   if (!app.ui.planMonth || !options.includes(app.ui.planMonth)) {
     // Default: this month once the plan has started, otherwise the latest complete month.
     app.ui.planMonth = started ? options.filter((ym) => ym <= monthOf(today)).pop() : [...options].reverse().find((ym) => isFull(m, ym)) || options[options.length - 1];
   }
   const ym = app.ui.planMonth;
   const idx = options.indexOf(ym);
+  st.idx = idx;
   const startsIn = daysBetween(today, plan.start);
-  const right = `<button class="glass-btn wide tint" data-act="edit">Edit</button>`;
-  const sub = `${plan.employer ? `${esc(plan.employer)} · ` : ''}${startsIn > 0 ? `starts ${dateLabel(plan.start, 'long')}` : `since ${dateLabel(plan.start, 'long')}`}`;
-
-  if (!ym) {
-    page.innerHTML = pageFrame({ title: 'Plan', sub, right, body: summaryPills(plan, t) + `<div class="card"><div class="empty"><h3>No data yet</h3><p>Add a statement to see your rings.</p></div></div>` });
-    wire(page, options, idx);
-    return;
-  }
+  const sub = `<p class="list-foot" style="margin:0 4px 12px;text-align:center">${plan.employer ? `${esc(plan.employer)} · ` : ''}${startsIn > 0 ? `starts ${dateLabel(plan.start, 'long')}` : `since ${dateLabel(plan.start, 'long')}`}</p>`;
+  if (!ym) return sub + summaryPills(plan, t) + '<div class="card"><div class="empty"><h3>No data yet</h3><p>Add a statement to see your rings.</p></div></div>';
 
   const pm = planMonth(m, ym);
   const before = ym < startYm;
@@ -68,9 +99,10 @@ export function renderPlan(page) {
     { label: 'Eating out', p: pct(pm.eatingOut, t.eatingOut), c1: RING.eating[1], c2: RING.eating[2] },
   ];
   const history = options.map((x) => planMonth(m, x)).filter((p) => p.hasData || p.ym === ym);
+  st.history = history;
   const metric = app.ui.planMetric || 'spent';
 
-  const body = `
+  return `${sub}
     <div class="pager">
       <button class="arrow" data-step="-1" aria-label="Previous month" ${idx <= 0 ? 'disabled' : ''}>${icon('chev-l')}</button>
       <button class="lbl" data-act="months" aria-label="Choose month: ${esc(monthLabel(ym))}">${esc(monthLabel(ym))}<small>${esc(status)}</small></button>
@@ -95,7 +127,7 @@ export function renderPlan(page) {
     </div>
 
     ${layoutOutdated(plan) ? `<div class="banner" style="--c:var(--blue)"><span class="ic">${icon('sparkle')}</span><span class="txt"><b>New budget layout</b><span>${esc(app.rules.planTemplate.lines.slice(0, 3).map((l) => l.name).join(' · '))} and ${app.rules.planTemplate.lines.length - 3} more, with savings first.</span></span><button class="btn small" data-act="apply-layout">Use It</button></div>` : ''}
-    <div class="section-head"><h2>Budget</h2><span class="more ${pm.spent > t.spend ? 'neg' : ''}">${m0(pm.spent)} of ${m0(t.spend)}</span></div>
+    <div class="section-head"><h2>Lines</h2><span class="more ${pm.spent > t.spend ? 'neg' : ''}">${m0(pm.spent)} of ${m0(t.spend)}</span></div>
     <div class="list">
       ${budgetRow({ id: '_save', name: 'Investing & Savings', amount: t.save, actual: Math.max(0, pm.saved), savings: true })}
       ${pm.lines.map((l) => budgetRow(l)).join('')}
@@ -125,13 +157,8 @@ export function renderPlan(page) {
       })() : ''}
     </div>
 
-    ${summaryPills(plan, t)}`;
-
-  page.innerHTML = pageFrame({ title: 'Plan', sub, right, body });
-  wire(page, options, idx);
-  layoutSegmented(page);
-  animateRings(page.querySelector('#rings'));
-  drawMetric(page.querySelector('#plan-chart'), history, ym, t, metric);
+    ${summaryPills(plan, t)}
+    <div class="btn-row"><button class="btn secondary" data-act="edit">Edit Budget</button></div>`;
 }
 
 function budgetRow(l) {
@@ -181,25 +208,7 @@ function verdict(pm, t, inProgress) {
   return `${m0(t.save - pm.saved)} short of the savings goal.`;
 }
 
-function wire(page, options = [], idx = 0) {
-  wireLargeTitle(page);
-  const go = (ymNew) => { app.ui.planMonth = ymNew; renderPlan(page); };
-  page.onclick = (e) => {
-    if (e.target.closest('[data-act="edit"]')) { haptic(); openPlanEditor(); return; }
-    if (e.target.closest('[data-act="apply-layout"]')) { haptic(); applyLayout(); return; }
-    if (e.target.closest('[data-act="months"]')) { haptic(); pickMonth(options, page); return; }
-    const s = e.target.closest('[data-step]');
-    if (s && !s.disabled) { haptic(); go(options[idx + Number(s.dataset.step)]); return; }
-    const seg = e.target.closest('[data-seg="planMetric"] button');
-    if (seg) { haptic(); app.ui.planMetric = seg.dataset.v; renderPlan(page); return; }
-    const line = e.target.closest('[data-line]');
-    if (line) { haptic(); openLine(line.dataset.line); return; }
-    const mo = e.target.closest('[data-month]');
-    if (mo) { haptic(); go(mo.dataset.month); page.querySelector('.scroller').scrollTo({ top: 0, behavior: 'smooth' }); }
-  };
-}
-
-function pickMonth(options, page) {
+function pickMonth(options, redraw) {
   const t = planTargets(app.model.plan);
   const sheet = openSheet({
     title: 'Month',
@@ -213,7 +222,7 @@ function pickMonth(options, page) {
   sheet.el.addEventListener('click', (e) => {
     const b = e.target.closest('[data-pick]');
     if (!b) return;
-    haptic(); app.ui.planMonth = b.dataset.pick; sheet.close(); renderPlan(page);
+    haptic(); app.ui.planMonth = b.dataset.pick; sheet.close(); redraw();
   });
 }
 
@@ -301,7 +310,7 @@ export function openPlanEditor() {
   const existing = app.vault.plan;
   let draft = existing ? structuredClone(existing) : null;
   const sheet = openSheet({
-    title: existing ? 'Edit Plan' : 'Set Up Plan', size: 'full',
+    title: existing ? 'Edit Budget' : 'Set Up Budget', size: 'full',
     left: `<button class="text-btn" data-close style="font-weight:400">Cancel</button>`,
     right: `<button class="text-btn" data-act="save">Save</button>`,
     body: '',
@@ -401,7 +410,8 @@ export function openPlanEditor() {
       app.ui.planMonth = null;
       sheet.close();
       await app.commit({ silent: true });
-      toast('Plan saved');
+      toast('Budget saved');
+      redrawBudget?.();
     }
   });
 }
@@ -423,5 +433,6 @@ async function applyLayout() {
   if (!ok) return;
   app.vault.plan = next;
   await app.commit({ silent: true });
-  toast('Budget updated. Save to GitHub to sync.');
+  toast('Budget updated');
+  redrawBudget?.();
 }

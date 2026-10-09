@@ -2,10 +2,10 @@
 
 A private, Apple-style finance app for your iPhone home screen. It's a static site plus a tiny sync API, hosted for free on Cloudflare Workers: no framework, no bundler, nothing to run.
 
-- **Overview**: balance with a Stocks-style chart you scrub with your finger, money in/out/net, and insights that dig into your data: possible double charges, where this month is heading, subscriptions and bills (with price rises and what's due next), unusual charges, how much of what comes in you keep, Amazon by what you actually bought, and more
-- **Spending**: by month, Everyday vs Everything, categories, monthly stacked chart, top merchants
-- **Activity**: every transaction, searchable. Re-categorize one, apply the change to all from a merchant (saved as a rule), or split one charge across categories.
-- **Plan**: budget from your start date, with Saved / Spent / Eating-out rings and budget vs actual
+- **Summary**: your balance with a Stocks-style chart you scrub with your finger; this month at a glance with Fitness-style rings for your budget (Spent, Saved, Eating out) and what's left to spend each day; **Highlights** that dig into your data (possible double charges, where the month is heading, subscriptions and bills with price rises, unusual charges, how much you keep, Amazon by what you bought, and more); bills coming up; your statements and bank
+- **Spending**: like Apple Card. **W / M / Y** for a week, month or year, the total with how it compares to the same point last time, bars stacked by category (tap one to see just that day or month, swipe to go back or forward), what's left in your budget per day, categories with their change, and the places you spend most. Everyday vs Everything from the button at the top.
+- **Activity**: every transaction, searchable (names, amounts, categories, notes), or a **Calendar** of what went out each day. Re-categorize, split a charge across categories, add a note, or apply a change to all from a merchant (saved as a rule).
+- **Budget** (from Summary, Spending or Settings): take-home pay and a savings goal split into a monthly budget, with rings, every line against its budget, and month by month
 - **Add Statement**: reads statements from any bank on your device (PDF, or the CSV, OFX/QFX or QIF file online banking lets you download), removes duplicates, categorizes, and reconciles to the bank's balances. Or connect your bank once (Plaid) and new transactions come in on their own; Amazon order history sorts Amazon charges by item
 - **Accounts**: share the link with family. Everyone gets their own private account with every feature, synced across their iPhone and Mac.
 
@@ -140,9 +140,9 @@ git add data/vault.enc.json && git commit -m "Add statements" && git push
 
 The token stays on that device only, encrypted with your passphrase, and is only ever sent to `api.github.com`.
 
-### 6. Set up your plan
+### 6. Set up your budget
 
-Open the **Plan** tab and tap **Set Up Plan**. Enter your employer, your start date, take-home pay, and your savings percentage. Money suggests a split of the spending budget (housing, groceries, restaurants, transport, misc, flex, coffee, gym) that you can edit line by line. The plan is stored inside the encrypted vault, not in the code.
+On **Summary**, tap **Set Budget** (or Settings → **Budget**). Enter your employer, your start date, take-home pay, and your savings percentage. Money suggests a split of the spending budget (housing, groceries, restaurants, transport, misc, flex, coffee, gym) that you can edit line by line. The budget is stored inside the encrypted vault, not in the code.
 
 ### 7. Install it on your iPhone
 

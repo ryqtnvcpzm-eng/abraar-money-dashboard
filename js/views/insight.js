@@ -14,7 +14,7 @@ const $ = (c) => fromCents(c);
 const m0 = (dollars) => money(dollars, { cents: false });
 
 export function openInsight(card) {
-  if (card.id === 'plan') { closeAllSheets(); app.selectTab('plan'); return; }
+  if (card.id === 'plan') { import('./budget.js').then((b) => b.openBudget()); return; }
   const builders = { habit, everyday, bigmonth, trend, mover, eating, pace, recurring: repeats, pricehike, upcoming: comingUp, unusual, duplicate, weekend, small, savings, runway, fees, amazon: amazonPage };
   const build = builders[card.id];
   if (!build) return;
@@ -117,7 +117,7 @@ function everyday(card, ctx) {
     ${stats([['Average', m0(avg), 'per month'], ['Highest', m0($(hi.total)), monthLabel(hi.ym, 'month')], ['Lowest', m0($(lo.total)), monthLabel(lo.ym, 'month')]])}
     <div class="list-head"><span>An average month</span></div>
     ${catRows(all, { per: Math.max(1, full.length), mode: 'everyday' })}
-    ${button(ctx.action('open', (s) => { s.close(); app.ui.mode = 'everyday'; app.ui.month = 'all'; app.stale.add('spending'); app.selectTab('spending'); }), 'Open in Spending')}`;
+    ${button(ctx.action('open', (s) => { closeAllSheets(); app.ui.mode = 'everyday'; app.ui.spKind = 'year'; app.ui.spAnchor = null; app.ui.spSel = null; app.stale.add('spending'); app.selectTab('spending'); }), 'Open in Spending')}`;
 }
 
 // ---------- Biggest month ----------
@@ -135,7 +135,7 @@ function bigmonth(card, ctx) {
     ${stats([[monthLabel(card.ym, 'month'), m0($(total)), 'spent'], ['Typical month', m0(typical), 'the others'], [rows[0]?.cat.name || '—', `${Math.round(((rows[0]?.cents || 0) / (total || 1)) * 100)}%`, 'of that month']])}
     <div class="list-head"><span>Where it went</span></div>
     ${catRows(rows, { ym: card.ym })}
-    ${button(ctx.action('open', (s) => { s.close(); app.ui.mode = 'everything'; app.ui.month = card.ym; app.stale.add('spending'); app.selectTab('spending'); }), `Open ${monthLabel(card.ym, 'month')} in Spending`)}`;
+    ${button(ctx.action('open', (s) => { closeAllSheets(); app.ui.mode = 'everything'; app.ui.spKind = 'month'; app.ui.spAnchor = `${card.ym}-01`; app.ui.spSel = null; app.stale.add('spending'); app.selectTab('spending'); }), `Open ${monthLabel(card.ym, 'month')} in Spending`)}`;
 }
 
 // ---------- Balance trend ----------

@@ -1,15 +1,21 @@
-// Activity: every transaction, searchable, grouped by day.
+// Activity: every transaction, searchable, grouped by day, or as a calendar of what went out each day.
 import { app } from '../state.js';
-import { money, dateLabel, esc, fromCents, monthLabel } from '../format.js';
-import { icon, pageFrame, wireLargeTitle, haptic } from '../ui.js';
+import { money, dateLabel, esc, fromCents, monthLabel, monthOf, nextMonth, daysInMonth, parseISO, iso } from '../format.js';
+import { icon, pageFrame, wireLargeTitle, haptic, segmented, layoutSegmented } from '../ui.js';
+import { dayTotals } from '../period.js';
 import { txnRow, openTxn } from './sheets.js';
 
 const FILTERS = [['all', 'All'], ['out', 'Money Out'], ['in', 'Money In'], ['oneoff', 'One-offs'], ['reversed', 'Reversed']];
 const PAGE = 60; // days rendered per chunk
 
+const viewSeg = () => segmented('actView', [['list', 'List'], ['calendar', 'Calendar']], app.ui.actView || 'list', 'act-seg');
+const addBtn = () => `<button class="glass-btn wide tint" data-act="add" aria-label="Add statement">${icon('plus')}<span>Add</span></button>`;
+
 export function renderActivity(page) {
-  const right = `<button class="glass-btn wide tint" data-act="add" aria-label="Add statement">${icon('plus')}<span>Add</span></button>`;
+  if (app.ui.actView === 'calendar' && app.model.txns.length) { renderCalendar(page); return; }
+  const right = addBtn();
   const body = `
+    ${app.model.txns.length ? viewSeg() : ''}
     <div class="search" role="search">${icon('search')}
       <input type="search" id="act-q" placeholder="Search" value="${esc(app.ui.search)}" aria-label="Search transactions" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
       <button class="clear" data-act="clear" aria-label="Clear search" ${app.ui.search ? '' : 'hidden'}>${icon('close')}</button>
@@ -18,6 +24,7 @@ export function renderActivity(page) {
     <div id="act-list"></div>`;
   page.innerHTML = pageFrame({ title: 'Activity', right, body });
   wireLargeTitle(page);
+  layoutSegmented(page);
 
   const listEl = page.querySelector('#act-list');
   const q = page.querySelector('#act-q');
@@ -83,6 +90,8 @@ export function renderActivity(page) {
     deb = setTimeout(() => { app.ui.search = q.value.trim(); clear.hidden = !app.ui.search; draw(); scroller.scrollTop = 0; }, 120);
   });
   page.onclick = async (e) => {
+    const v = e.target.closest('[data-seg="actView"] button');
+    if (v) { haptic(); app.ui.actView = v.dataset.v; renderActivity(page); return; }
     const f = e.target.closest('[data-filter]');
     if (f) {
       haptic();
@@ -120,7 +129,78 @@ function filtered() {
     if (f === 'reversed' && !t.netted) return false;
     if (!words.length) return true;
     // Built once per transaction per model, not on every keystroke.
-    t.hay ||= `${t.name} ${t.merchant} ${t.cat.name} ${Math.abs(t.amount).toFixed(2)} ${monthLabel(t.month)} ${dateLabel(t.date)} ${(t.note || []).join(' ')} ${(t.split || []).flatMap((p) => p.note || []).join(' ')}`.toLowerCase();
+    t.hay ||= `${t.name} ${t.merchant} ${t.cat.name} ${Math.abs(t.amount).toFixed(2)} ${monthLabel(t.month)} ${dateLabel(t.date)} ${(t.note || []).join(' ')} ${(t.split || []).flatMap((p) => p.note || []).join(' ')} ${t.memo || ''}`.toLowerCase();
     return words.every((w) => t.hay.includes(w));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Calendar: each day's money out, sized like the Fitness app's history; tap a day for its transactions
+// ---------------------------------------------------------------------------
+function renderCalendar(page) {
+  const m = app.model;
+  const totals = dayTotals(m, 'everything');
+  const first = m.txns[0].date, last = m.txns[m.txns.length - 1].date;
+  let ym = app.ui.calMonth && app.ui.calMonth >= monthOf(first) && app.ui.calMonth <= monthOf(last) ? app.ui.calMonth : monthOf(last);
+  app.ui.calMonth = ym;
+  const days = daysInMonth(ym);
+  const lead = parseISO(`${ym}-01`).getDay();
+  const dates = Array.from({ length: days }, (_, i) => `${ym}-${String(i + 1).padStart(2, '0')}`);
+  const vals = dates.map((d) => totals.get(d) || 0);
+  const max = Math.max(1, ...vals);
+  const monthOut = vals.reduce((a, b) => a + b, 0);
+  const spendDays = vals.filter((v) => v > 0).length;
+  if (!app.ui.calDay || monthOf(app.ui.calDay) !== ym) app.ui.calDay = [...dates].reverse().find((d) => totals.get(d)) || dates[0];
+  const sel = app.ui.calDay;
+  const today = iso(new Date());
+  const dayTx = m.txns.filter((t) => t.date === sel && !t.partOf).concat(
+    [...new Set(m.txns.filter((t) => t.date === sel && t.partOf).map((t) => t.partOf))].map((id) => m.byId.get(id)));
+  const net = dayTx.filter((t) => !t.netted).reduce((s, t) => s + (t.split ? t.live : t.c), 0);
+  const noSpend = dates.filter((d) => d <= last && d >= first && !(totals.get(d) > 0)).length;
+
+  const body = `
+    ${viewSeg()}
+    <div class="pager">
+      <button class="arrow" data-cal="-1" aria-label="Previous month" ${ym <= monthOf(first) ? 'disabled' : ''}>${icon('chev-l')}</button>
+      <div class="lbl" style="cursor:default">${esc(monthLabel(ym))}<small>${money(fromCents(monthOut), { cents: false })} out · ${spendDays} spending day${spendDays === 1 ? '' : 's'}</small></div>
+      <button class="arrow" data-cal="1" aria-label="Next month" ${ym >= monthOf(last) ? 'disabled' : ''}>${icon('chev-r')}</button>
+    </div>
+    <div class="card cal-card">
+      <div class="cal-grid cal-dow" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
+      <div class="cal-grid" role="grid" aria-label="${esc(monthLabel(ym))}">
+        ${'<span></span>'.repeat(lead)}
+        ${dates.map((d, i) => {
+          const v = vals[i];
+          const size = v > 0 ? Math.round(12 + 26 * Math.sqrt(v / max)) : 0;
+          const outside = d < first || d > last;
+          return `<button class="cal-day ${d === sel ? 'sel' : ''} ${d === today ? 'today' : ''} ${outside ? 'out' : ''}" data-day="${d}" ${outside ? 'disabled' : ''}
+            aria-label="${esc(dateLabel(d, 'day'))}: ${money(fromCents(v))} out" aria-pressed="${d === sel}">
+            <span class="cal-dot" style="--s:${size}px;--o:${(0.35 + 0.65 * Math.sqrt(v / max)).toFixed(2)}"></span><span class="cal-n">${i + 1}</span></button>`;
+        }).join('')}
+      </div>
+      <div class="chart-foot"><span>Bigger dot, more money out</span><span>${noSpend} no-spend day${noSpend === 1 ? '' : 's'}</span></div>
+    </div>
+    <div class="list-head"><span>${esc(dateLabel(sel, 'day'))}</span><span>${dayTx.length ? money(fromCents(net), { sign: true }) : ''}</span></div>
+    <div class="list">${dayTx.map((t) => txnRow(t)).join('') || '<div class="empty">Nothing on this day.</div>'}</div>`;
+  page.innerHTML = pageFrame({ title: 'Activity', right: addBtn(), body });
+  wireLargeTitle(page);
+  layoutSegmented(page);
+  page.onclick = async (e) => {
+    const v = e.target.closest('[data-seg="actView"] button');
+    if (v) { haptic(); app.ui.actView = v.dataset.v; renderActivity(page); return; }
+    const c = e.target.closest('[data-cal]');
+    if (c && !c.disabled) { haptic(); app.ui.calMonth = nextMonth(ym, Number(c.dataset.cal)); app.ui.calDay = null; renderCalendar(page); return; }
+    const d = e.target.closest('[data-day]');
+    if (d && !d.disabled) {
+      haptic();
+      app.ui.calDay = d.dataset.day;
+      const y = page.querySelector('.scroller').scrollTop;
+      renderCalendar(page);
+      page.querySelector('.scroller').scrollTop = y;
+      return;
+    }
+    if (e.target.closest('[data-act="add"]')) { haptic(); (await import('./importer.js')).openImporter(); return; }
+    const r = e.target.closest('[data-txn]');
+    if (r) { haptic(); openTxn(r.dataset.txn, { onChange: () => renderCalendar(page) }); }
+  };
 }

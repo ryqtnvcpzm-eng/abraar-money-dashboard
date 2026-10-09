@@ -10,6 +10,7 @@ import { pdfToPages } from '../js/pdf-text.js';
 import { parseCibcStatement, reconcile, parseSummary } from '../js/cibc-parser.js';
 import { compileRules, cleanName, sanitizeDescription, categorize, productCategory, isMixedStore, hintCategory } from '../js/categorize.js';
 import { applyBankSync, lastFileDay } from '../js/bank.js';
+import { periodFor, shiftPeriod, periodLabel, periodName, buckets, rangeSpend, dayTotals } from '../js/period.js';
 import { emptyVault, prepareImport, commitImport, buildModel, flow, spendByCategory, dailyBalance, planFromTemplate, planTargets, insights, splitParts } from '../js/ledger.js';
 import { recurring, upcoming, duplicates, pace, unusual, cashflow } from '../js/analysis.js';
 import { readOrderFiles, applyOrders, matchWaiting, _test as _amz } from '../js/amazon.js';
@@ -554,6 +555,39 @@ await test('bank categories map to Money’s', () => {
   assert.equal(hintCategory('INCOME_WAGES', -10), null, 'money out is never income');
   assert.equal(hintCategory('FOOD_AND_DRINK_RESTAURANT', 10), 'dining', 'a refund keeps its category');
   assert.equal(hintCategory('SOMETHING_NEW'), null);
+});
+
+console.log('Spending periods');
+await test('weeks, months and years, and stepping between them', () => {
+  assert.deepEqual(periodFor('week', '2026-10-08'), { kind: 'week', from: '2026-10-04', to: '2026-10-10', key: '2026-10-04' });
+  assert.deepEqual(periodFor('month', '2026-02-14'), { kind: 'month', from: '2026-02-01', to: '2026-02-28', key: '2026-02' });
+  assert.deepEqual(periodFor('year', '2026-06-01'), { kind: 'year', from: '2026-01-01', to: '2026-12-31', key: '2026' });
+  assert.equal(shiftPeriod(periodFor('month', '2026-01-15'), -1).key, '2025-12');
+  assert.equal(shiftPeriod(periodFor('week', '2026-01-01'), 1).from, '2026-01-04');
+  assert.equal(periodLabel(periodFor('month', '2026-10-02'), '2026-10-09'), 'This Month');
+  assert.equal(periodLabel(periodFor('month', '2026-09-02'), '2026-10-09'), 'Last Month');
+  assert.equal(periodName(periodFor('week', '2026-09-30')), 'Sep 27 – Oct 3');
+});
+await test('bars add up to the period, by category, with refunds netted', () => {
+  const v = emptyVault();
+  v.statements.push({ id: '2026-03', start: '2026-03-01', end: '2026-03-31', opening: 100, closing: 100 });
+  const tx = (id, date, merchant, amount) => v.transactions.push({ id, date, merchant, name: '', amount, category: 'other', statement: '2026-03' });
+  tx('a', '2026-03-02', 'VISA DEBIT PURCHASE PROVIGO', -40);
+  tx('b', '2026-03-02', 'RETAIL PURCHASE COUCHE-TARD', -3.5);
+  tx('c', '2026-03-09', 'VISA DEBIT PURCHASE PROVIGO', 10); // a refund
+  tx('d', '2026-03-10', 'E-TRANSFER Sample Friend', -50); // not everyday
+  const m = buildModel(v, compiled);
+  const month = periodFor('month', '2026-03-05');
+  const bars = buckets(m, month, 'everyday');
+  assert.equal(bars.length, 31);
+  assert.equal(bars[1].total, 4350);
+  assert.deepEqual(bars[1].rows.map((r) => r.cat.id), ['groceries', 'coffee']);
+  assert.equal(rangeSpend(m, month.from, month.to, 'everyday').total, 3350);
+  assert.equal(rangeSpend(m, month.from, month.to, 'everything').total, 8350);
+  assert.equal(bars[8].total, 0, 'a day with only a refund has no bar (never a negative one)');
+  assert.equal(bars.reduce((s, b) => s + b.total, 0), 4350, 'bars show what went out; the period total nets the refund');
+  assert.equal(buckets(m, periodFor('year', '2026-03-05'), 'everyday')[2].total, 3350);
+  assert.equal(dayTotals(m).get('2026-03-10'), 5000);
 });
 
 console.log('PDF import (synthetic statements)');

@@ -51,6 +51,8 @@ export function openSettings() {
         ${row('arrows', 'blue', 'Bank Sync', { sub: v.bank?.accessToken ? `${v.bank.institution || 'Connected'}${v.bank.problem ? ' · needs you to sign in again' : ''}` : 'Pull new transactions from your bank', act: 'bank' })}
         ${row('box', 'orange', 'Amazon Orders', { sub: 'Sort Amazon charges by what you bought', act: 'amazon' })}
         ${row('tag', 'orange', 'Merchant Rules', { detail: String((v.userRules || []).length), act: 'rules' })}
+        ${row('rings', 'green', 'Budget', { sub: v.plan ? `${money(v.plan.takeHome, { cents: false })} take-home · save ${v.plan.savePct}%` : 'Set a monthly budget and savings goal', act: 'budget' })}
+        ${row('share', 'gray', 'Export Transactions', { sub: 'A CSV file for Numbers, Excel or your accountant', act: 'csv' })}
       </div>
 
       <div class="list-head"><span>Security</span></div>
@@ -110,6 +112,8 @@ export function openSettings() {
     if (act === 'rules') openRules(draw);
     if (act === 'amazon') (await import('./amazon-import.js')).openAmazonImport();
     if (act === 'bank') (await import('./bank.js')).openBank({ onDone: draw });
+    if (act === 'budget') (await import('./budget.js')).openBudget();
+    if (act === 'csv') exportCsv();
     if (act === 'autolock') pickAutoLock(draw);
     if (act === 'passphrase') changePassphrase();
     if (act === 'lock') { sheet.close(); app.lock(); }
@@ -555,4 +559,27 @@ function openRecovery(onDone, { fresh = false } = {}) {
     });
   };
   draw();
+}
+
+/** Every transaction as a CSV file (split charges as their parts, so columns add up). Plain text: keep it private. */
+export function exportCsv() {
+  const m = app.model;
+  // Text that a spreadsheet would run as a formula (=, +, -, @) gets a leading apostrophe; numbers stay numbers.
+  const q = (v, text = true) => {
+    let t = String(v ?? '');
+    if (text && /^[=+\-@]/.test(t)) t = `'${t}`;
+    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
+  const head = ['Date', 'Name', 'Category', 'Amount', 'Currency', 'Description', 'Note', 'Items', 'One-off', 'Reversed', 'Statement'];
+  const cur = m.vault.account?.currency || 'CAD';
+  const lines = [head.join(',')].concat(m.txns.map((t) => [
+    t.date, t.name, t.cat.name, t.amount.toFixed(2), cur, t.merchant, t.memo || '', (t.note || []).join('; '),
+    t.oneOff ? 'yes' : '', t.netted ? 'yes' : '', t.statement,
+  ].map((v, i) => q(v, i !== 0 && i !== 3)).join(',')));
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: `money-transactions-${new Date().toISOString().slice(0, 10)}.csv` });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast(`Exported ${m.txns.length.toLocaleString('en-CA')} transactions`, { icon: 'share', color: 'blue' });
 }
