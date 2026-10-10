@@ -581,7 +581,11 @@ function enter({ session, vault, demo, firstRun = false }) {
   startAutoLock();
   haptic();
   if (firstRun) setTimeout(() => import('./views/importer.js').then((m) => m.openImporter({ welcome: true })), 600);
-  if (app.account && !demo) pullLatest().then(offerUnsynced).then(() => (app.vault?.bank && !app.demo ? import('./views/bank.js').then((m) => m.maybeAutoSync()) : null));
+  if (app.account && !demo) {
+    pullLatest().then(offerUnsynced)
+      .then(() => (app.vault?.bank && !app.demo ? import('./views/bank.js').then((m) => m.maybeAutoSync()) : null))
+      .then(() => (app.vault?.mail?.refresh && !app.demo ? import('./views/mail.js').then((m) => m.maybeAutoCheck()) : null));
+  }
 }
 
 export function rebuild() {

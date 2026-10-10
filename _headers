@@ -1,7 +1,7 @@
 # Security headers for Cloudflare Pages (and Netlify, which uses the same file format).
 # GitHub Pages ignores this file; there the same rules come from <meta> tags in index.html.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://api.github.com; worker-src 'self' blob:; manifest-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://api.github.com https://gmail.googleapis.com; worker-src 'self' blob:; manifest-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   X-Robots-Tag: noindex, nofollow, noarchive, nosnippet
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff

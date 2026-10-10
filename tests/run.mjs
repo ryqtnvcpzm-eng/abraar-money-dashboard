@@ -21,6 +21,9 @@ import { scanDate, parseMoney, resolveOrder } from '../js/parse-util.js';
 import { parseGenericStatement } from '../js/generic-parser.js';
 import { readStatementFile, parseLoaded, loadFile } from '../js/statements.js';
 import { FIXTURES } from './fixtures-generic.mjs';
+import { ALERTS, NOT_ALERTS } from './fixtures-email.mjs';
+import { parseAlert, parseEml, fromGmail, htmlToText, sourceOf } from '../js/email-parse.js';
+import { routeAlerts, addAlerts, dismissAlerts, isMail } from '../js/mail.js';
 import { EXPORTS } from './fixtures-exports.mjs';
 import { WORLD_TXNS } from './fixtures-categories.mjs';
 
@@ -701,6 +704,96 @@ try {
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
+
+
+console.log('Bank emails');
+const readFixture = (f) => (f.eml ? parseEml(f.eml) : f.msg.html ? { ...f.msg, text: htmlToText(f.msg.html) } : f.msg);
+for (const f of ALERTS) {
+  await test(`alert: ${f.name}`, () => {
+    const r = parseAlert(readFixture(f), { today: f.today || '2026-10-03' });
+    assert.equal(r.ok, true, r.reason);
+    for (const [k, v] of Object.entries(f.expect)) {
+      if (k === 'merchant') { if (v === null) assert.equal(r.merchant, null); else assert.ok(String(r.merchant || '').toLowerCase().includes(v.toLowerCase()), `merchant ${r.merchant}`); }
+      else if (k === 'merchantIs') assert.equal(r.merchant, v);
+      else assert.equal(r[k], v, k);
+    }
+    // Nothing that looks like a card, account or reference number survives.
+    assert.ok(!/\d{4,}/.test(JSON.stringify({ m: r.merchant, b: r.bank })), JSON.stringify(r));
+  });
+}
+await test('not transactions: codes, statements, reminders, ads, balances, declines, shipping', () => {
+  for (const f of NOT_ALERTS) {
+    const r = parseAlert(f.msg, { today: '2026-10-03' });
+    assert.equal(r.ok, false, `${f.name}: ${JSON.stringify(r)}`);
+    if (f.reason) assert.equal(r.reason, f.reason, f.name);
+  }
+});
+await test('Gmail messages (base64url parts) read like .eml files', () => {
+  const enc = (s) => Buffer.from(s, 'utf8').toString('base64url');
+  const msg = { id: 'g1', payload: { mimeType: 'multipart/alternative', headers: [{ name: 'From', value: 'TD <alerts@td.com>' }, { name: 'Subject', value: 'Purchase alert' }, { name: 'Date', value: 'Fri, 03 Oct 2026 10:00:00 -0400' }],
+    parts: [{ mimeType: 'text/plain', headers: [{ name: 'Content-Type', value: 'text/plain; charset=UTF-8' }], body: { data: enc('Open in browser') } },
+      { mimeType: 'text/html', headers: [{ name: 'Content-Type', value: 'text/html; charset=UTF-8' }], body: { data: enc('<p>A purchase of <b>$5.60</b> was made at <b>CAFÉ OLÉ</b> on Oct 3, 2026 with your TD Visa card.</p>') } }] } };
+  const r = parseAlert({ ...fromGmail(msg), id: 'gmail:g1' }, { today: '2026-10-03' });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.amount, -5.6);
+  assert.equal(r.merchant, 'Café Olé');
+  assert.equal(r.bank, 'TD');
+});
+
+const alert = (key, date, amount, merchant, extra = {}) => ({ ok: true, key, date, amount, currency: null, merchant, kind: amount < 0 ? 'purchase' : 'refund', account: 'card', bank: 'CIBC', confidence: 'high', score: 10, ...extra });
+await test('alerts fill only the days after your statements, and skip what’s already there', () => {
+  const v = fileVault();
+  delete v.bank;
+  const out = routeAlerts(v, [
+    alert('a1', '2026-09-20', -9, 'Old Thing'), // a statement covers September
+    alert('a2', '2026-10-02', -12.48, 'Tim Hortons'),
+    alert('a3', '2026-10-03', -30, 'Mystery', { confidence: 'check' }),
+    { ok: false, key: 'n1', reason: 'promo' },
+  ], { today: '2026-10-04' });
+  assert.deepEqual([out.added, out.waiting, out.covered, out.notAlerts], [0, 2, 1, 1], 'a source you haven’t said yes to waits for a check');
+  assert.equal(v.mail.pending.length, 2);
+  const r = addAlerts(v, v.mail.pending.map((p) => ({ ...p, ok: true })), { today: '2026-10-04' });
+  assert.equal(r.added, 2);
+  assert.equal(v.mail.pending.length, 0);
+  const m = buildModel(v, compiled);
+  const t = m.txns.find((x) => x.ext === 'mail:a2');
+  assert.equal(t.amount, -12.48);
+  assert.equal(t.name, 'Tim Hortons');
+  assert.ok(v.statements.some((s) => s.id === '2026-10' && s.source === 'sync'), 'October gets a statement of its own');
+  // The same email again does nothing; neither does a second alert for the same purchase.
+  const again = routeAlerts(v, [alert('a2', '2026-10-02', -12.48, 'Tim Hortons'), alert('a4', '2026-10-03', -12.48, 'Tim Hortons Store')], { today: '2026-10-04' });
+  assert.equal(again.added + again.waiting, 1);
+});
+await test('followed sources add sure alerts by themselves; ignored ones are dropped', () => {
+  const v = fileVault();
+  delete v.bank;
+  routeAlerts(v, [], {});
+  v.mail.sources[sourceOf(alert('x', '2026-10-01', -1, 'x'))] = true;
+  v.mail.sources['TD · Bank account'] = false;
+  const out = routeAlerts(v, [
+    alert('b1', '2026-10-02', -4.5, 'Corner Cafe'),
+    alert('b2', '2026-10-02', -60, 'Unsure Place', { confidence: 'check' }),
+    alert('b3', '2026-10-02', -20, 'USD Shop', { currency: 'USD' }),
+    alert('b4', '2026-10-02', -15, 'Td Thing', { bank: 'TD', account: 'bank' }),
+  ], { today: '2026-10-04', currency: 'CAD' });
+  assert.deepEqual([out.added, out.waiting, out.ignored], [1, 2, 1], 'unsure and foreign-currency alerts wait');
+  dismissAlerts(v, v.mail.pending.map((p) => p.key));
+  assert.equal(routeAlerts(v, [alert('b2', '2026-10-02', -60, 'Unsure Place', { confidence: 'check' })], { today: '2026-10-04' }).waiting, 0, 'a skipped alert isn’t asked about again');
+});
+await test('the bank feed and statements replace alert transactions (keeping your edits)', () => {
+  const v = fileVault();
+  addAlerts(v, [alert('c1', '2026-10-02', -12.5, 'Qwerty Studio'), alert('c2', '2026-10-05', -8, 'Corner Shop')], { today: '2026-10-06' });
+  const mine = v.transactions.find((t) => t.ext === 'mail:c1');
+  Object.assign(mine, { category: 'fitness', locked: true, memo: 'yoga' });
+  applyBankSync(v, { added: [feed('o1', '2026-10-03', 12.5, 'QWERTY STUDIO TORONTO')], modified: [], removed: [], cursor: 'c2', accounts: [] }, { today: '2026-10-06' });
+  assert.equal(v.transactions.filter((t) => isMail(t)).length, 1, 'the feed’s copy replaced the alert');
+  const fromFeed = v.transactions.find((t) => t.ext === 'o1');
+  assert.deepEqual([fromFeed.category, fromFeed.locked, fromFeed.memo], ['fitness', true, 'yoga']);
+  // A statement file for October covers the rest.
+  const prep = prepareImport(v, { period: { start: '2026-10-01', end: '2026-10-31' }, opening: 1000, closing: 979.5, transactions: [{ date: '2026-10-05', description: 'CORNER SHOP', amount: -8 }, { date: '2026-10-03', description: 'QWERTY STUDIO', amount: -12.5 }] }, compiled);
+  commitImport(v, prep);
+  assert.equal(v.transactions.filter((t) => isMail(t)).length, 0);
+});
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 process.exit(failures.length ? 1 : 0);

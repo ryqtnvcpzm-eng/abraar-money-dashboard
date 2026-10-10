@@ -743,3 +743,14 @@ body.sheet-open #app .navbar::before { background: var(--bar-solid); }
 .sp-row .pct { display: block; font: 400 13px/18px var(--font); color: var(--label-2); }
 .sp-more { display: block; width: 100%; padding: 12px 16px 10px; border: 0; border-top: .5px solid var(--separator); background: none; color: var(--tint); font: 400 17px/22px var(--font); text-align: left; cursor: pointer; }
 
+
+/* Bank Emails */
+.mail-row .pick { width: 24px; height: 24px; border-radius: 24px; border: 1.5px solid var(--label-3); flex: none; display: grid; place-items: center; transition: background 150ms, border-color 150ms; }
+.mail-row .pick .icon { width: 15px; height: 15px; color: #fff; opacity: 0; stroke-width: 3; }
+.mail-row[aria-pressed="true"] .pick { background: var(--blue); border-color: var(--blue); }
+.mail-row[aria-pressed="true"] .pick .icon { opacity: 1; }
+.mail-row[aria-pressed="false"] .title, .mail-row[aria-pressed="false"] .value { opacity: .5; }
+.mail-tag { display: inline-block; vertical-align: 2px; margin-left: 6px; padding: 3px 6px; border-radius: 6px; font: 600 11px/1 var(--font); color: var(--orange); background: color-mix(in srgb, var(--orange) 16%, transparent); }
+.mail-paste { display: block; width: 100%; min-height: 120px; padding: 12px 14px; border: 0; border-radius: 14px; background: var(--fill-3); font: 400 15px/1.35 var(--font); resize: vertical; outline: none; box-sizing: border-box; }
+.mail-paste:focus { box-shadow: 0 0 0 3px color-mix(in srgb, var(--tint) 35%, transparent); }
+.badge-count { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px; background: var(--red); color: #fff; font: 600 13px/22px var(--font); text-align: center; box-sizing: border-box; flex: none; }

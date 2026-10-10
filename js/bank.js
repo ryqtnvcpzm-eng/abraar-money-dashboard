@@ -5,7 +5,7 @@
 // you added, and a statement added later for those days replaces them (commitImport does that).
 // Balances for synced days are worked out back from the balance the bank reports now.
 import { sanitizeDescription } from './categorize.js';
-import { addDays, daysInMonth, monthOf, nextMonth, toCents, fromCents, iso } from './format.js';
+import { addDays, daysInMonth, daysBetween, monthOf, nextMonth, toCents, fromCents, iso } from './format.js';
 
 /** The last day covered by a statement you added (PDF, CSV…), or null. */
 export function lastFileDay(vault) {
@@ -69,6 +69,7 @@ export function applyBankSync(vault, res, { today = iso(new Date()) } = {}) {
       if (!next.hint) delete old.hint;
       counts.updated++;
     } else {
+      absorbAlert(vault, next);
       vault.transactions.push(next);
       byExt.set(t.id, next);
       counts.added++;
@@ -137,3 +138,26 @@ export function syncStatements(vault, { today = iso(new Date()) } = {}) {
 
 /** Accounts a vault can follow: chequing, savings and credit cards (not loans or investments). */
 export const followable = (accounts) => (accounts || []).filter((a) => a.type === 'depository' || a.type === 'credit');
+
+// Transactions from bank alert emails (see mail.js) are stand-ins until the feed or a statement has them.
+export const isMail = (t) => typeof t?.ext === 'string' && t.ext.startsWith('mail:');
+const words = (s) => new Set(String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 3));
+/** The same payment seen twice (an alert and a statement line, or two alerts for one purchase)? */
+export function sameTxn(a, b) {
+  if (toCents(a.amount) !== toCents(b.amount)) return false;
+  const gap = Math.abs(daysBetween(a.date, b.date));
+  if (gap > 3) return false;
+  if (gap <= 1) return true;
+  const wa = words(a.merchant || a.name), wb = words(b.merchant || b.name);
+  for (const w of wa) if (wb.has(w)) return true;
+  return false;
+}
+
+/** When the bank feed brings a payment an alert already added, the feed's copy wins (keeping your edits). */
+export function absorbAlert(vault, feedTxn) {
+  const i = vault.transactions.findIndex((t) => isMail(t) && sameTxn(t, feedTxn));
+  if (i < 0) return null;
+  const [old] = vault.transactions.splice(i, 1);
+  for (const k of ['locked', 'category', 'name', 'memo', 'oneOff', 'parts']) if (old[k] != null && (k !== 'category' || old.locked)) feedTxn[k] = old[k];
+  return old;
+}

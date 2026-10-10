@@ -52,6 +52,12 @@ export function renderOverview(page) {
         <span class="subtitle">${app.vault.bank?.accessToken ? (app.vault.bank.problem ? 'Needs you to sign in again' : app.vault.bank.lastSync ? `Synced ${esc(new Date(app.vault.bank.lastSync).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Connected') : 'New transactions come in on their own'}</span></span>
         ${icon('chev-r', 'chev')}
       </button>` : ''}
+      ${!app.demo && (app.vault.mail?.refresh || app.vault.mail?.pending?.length) ? `<button class="row with-icon tap" data-act="mail">
+        <span class="cat-icon sm" style="--c:var(--${app.vault.mail.problem ? 'orange' : 'indigo'})">${icon('envelope')}</span>
+        <span class="main"><span class="title">Bank Emails</span>
+        <span class="subtitle">${app.vault.mail.problem ? 'Needs you to sign in to Gmail again' : app.vault.mail.pending?.length ? `${plural(app.vault.mail.pending.length, 'transaction')} to check` : app.vault.mail.lastCheck ? `Checked ${esc(new Date(app.vault.mail.lastCheck).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Gmail connected'}</span></span>
+        ${app.vault.mail.pending?.length ? `<span class="badge-count">${app.vault.mail.pending.length}</span>` : ''}${icon('chev-r', 'chev')}
+      </button>` : ''}
       <button class="row with-icon tap" data-act="statements">
         <span class="cat-icon sm" style="--c:var(--${bad ? 'orange' : 'green'})">${icon(bad ? 'warn' : 'seal')}</span>
         <span class="main"><span class="title">${plural(m.statements.length, 'statement')}</span>
@@ -278,6 +284,7 @@ function wire(page) {
     if (act === 'exit-demo') app.lock();
     if (act === 'budget') (await import('./budget.js')).openBudget({ ym: e.target.closest('[data-ym]')?.dataset.ym || null });
     if (act === 'bank') (await import('./bank.js')).openBank();
+    if (act === 'mail') (await import('./mail.js')).openMail();
     if (act === 'spending') { const ym = e.target.closest('[data-ym]')?.dataset.ym; app.ui.spKind = 'month'; app.ui.spAnchor = ym ? `${ym}-01` : null; app.ui.spSel = null; app.ui.mode = 'everyday'; app.stale.add('spending'); app.selectTab('spending'); }
     if (act === 'all-insights') openAllInsights();
   };
