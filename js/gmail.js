@@ -1,79 +1,42 @@
-// Reading bank alert emails from Gmail, in the browser. The app asks Gmail itself (read-only), so no
-// email passes through the sync server; only the parsed date, amount and merchant are kept, in the vault.
-import { fromGmail, parseAlert, mailKey } from './email-parse.js';
+// Gmail, browser side. The sync server checks Gmail every hour and seals any alert emails it finds to this
+// account's public key; the private key lives only in the encrypted vault, so only your own devices can
+// open them. This file makes the key pair, opens what the server sealed, and reads the emails.
+import { fromGmail, parseAlert } from './email-parse.js';
 
-const API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const subtle = globalThis.crypto.subtle;
+const enc = new TextEncoder();
 const b64url = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const EC = { name: 'ECDH', namedCurve: 'P-256' };
 
 /** PKCE pair for Google sign-in: the verifier stays in this tab, Google gets the challenge. */
 export async function pkce() {
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
-  const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  const challenge = b64url(new Uint8Array(await subtle.digest('SHA-256', enc.encode(verifier))));
   return { verifier, challenge };
 }
 
-/**
- * The Gmail search: words money alerts use (Gmail ORs words in braces), since the last check
- * (or the last 60 days the first time), leaving out the Promotions and Social tabs.
- */
-export function alertQuery(since) {
-  const words = '{transaction purchase purchased spent charged charge withdrawal withdrawn deposit deposited refund refunded debited credited "e-transfer" etransfer "sent you" "you sent" "you paid" "payment received" alert}';
-  const s = since ? Date.parse(since) : NaN;
-  const when = Number.isFinite(s) ? `after:${Math.floor(s / 1000) - 2 * 86400}` : 'newer_than:60d';
-  return `${words} ${when} -category:promotions -category:social`;
+/** A new key pair for sealed email. The private half goes into the vault (as JWK). */
+export async function newMailKey() {
+  const pair = await subtle.generateKey(EC, true, ['deriveBits']);
+  const { kty, crv, x, y, d } = await subtle.exportKey('jwk', pair.privateKey);
+  return { kty, crv, x, y, d };
+}
+export const publicOf = (key) => ({ kty: 'EC', crv: 'P-256', x: key.x, y: key.y });
+
+/** Open one sealed box from the server (ECDH with its one-off key → HKDF → AES-GCM). Returns its JSON. */
+export async function openBox(key, box) {
+  if (box?.v !== 1) throw new Error('bad_box');
+  const priv = await subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: key.x, y: key.y, d: key.d }, EC, false, ['deriveBits']);
+  const pub = await subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: box.epk.x, y: box.epk.y }, EC, false, []);
+  const bits = await subtle.deriveBits({ name: 'ECDH', public: pub }, priv, 256);
+  const hk = await subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
+  const aes = await subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode('money/mail-box/v1') }, hk, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const plain = await subtle.decrypt({ name: 'AES-GCM', iv: unb64(box.iv) }, aes, unb64(box.ct));
+  return JSON.parse(new TextDecoder().decode(plain));
 }
 
-export class GmailError extends Error {
-  constructor(code, status) { super(code); this.code = code; this.status = status; }
-}
-
-async function get(token, path) {
-  let res;
-  try {
-    res = await fetch(`${API}/${path}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
-  } catch { throw new GmailError('offline', 0); }
-  if (res.status === 401) throw new GmailError('expired', 401);
-  if (res.status === 403) throw new GmailError('forbidden', 403); // Gmail API not switched on, or no permission
-  if (res.status === 429) throw new GmailError('busy', 429);
-  if (!res.ok) throw new GmailError('gmail_error', res.status);
-  return res.json();
-}
-
-/** Gmail's message id → the key Money remembers it by. */
-export const gmailKey = (id) => mailKey({ id: `gmail:${id}` });
-
-/**
- * Find and read new alert emails. seen: keys already handled. Returns { parsed: [parseAlert results], scanned, more }
- * (more: there were more than `max` new ones; ask again and the next batch comes, since these are now seen).
- * onProgress(done, total) while reading.
- */
-export async function readAlerts(token, { since = null, seen = new Set(), max = 250, today, onProgress } = {}) {
-  const q = encodeURIComponent(alertQuery(since));
-  const ids = [];
-  let page = '';
-  let more = false;
-  for (let pages = 0; ; pages++) {
-    const list = await get(token, `messages?q=${q}&maxResults=100${page ? `&pageToken=${encodeURIComponent(page)}` : ''}`);
-    for (const m of list.messages || []) if (!seen.has(gmailKey(m.id))) ids.push(m.id);
-    if (!list.nextPageToken) break;
-    if (ids.length >= max || pages >= 40) { more = true; break; }
-    page = list.nextPageToken;
-  }
-  if (ids.length > max) more = true;
-  const todo = ids.slice(0, max);
-  const parsed = [];
-  let done = 0;
-  // A few at a time: quick, and well inside Gmail's limits.
-  const worker = async () => {
-    while (todo.length) {
-      const id = todo.shift();
-      const msg = await get(token, `messages/${encodeURIComponent(id)}?format=full`);
-      const m = fromGmail(msg);
-      parsed.push(parseAlert({ ...m, id: `gmail:${id}` }, today ? { today } : {}));
-      done++;
-      onProgress?.(done, done + todo.length);
-    }
-  };
-  await Promise.all(Array.from({ length: 5 }, worker));
-  return { parsed, scanned: done, more };
+/** Gmail messages (as the server passed them on) → parsed alerts. */
+export function readMessages(messages, { today } = {}) {
+  return messages.map((m) => parseAlert({ ...fromGmail(m), id: `gmail:${m.id}` }, today ? { today } : {}));
 }

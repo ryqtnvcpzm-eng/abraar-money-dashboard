@@ -6,6 +6,7 @@ import * as cloud from '../js/cloud.js';
 import { emptyVault } from '../js/ledger.js';
 import { seal, openWithSession } from '../js/crypto.js';
 import { plaidMock } from './plaid-mock.mjs';
+import { newMailKey, publicOf, openBox, readMessages } from '../js/gmail.js';
 
 // --- minimal D1 shim over node:sqlite ---
 function fakeD1() {
@@ -15,6 +16,7 @@ function fakeD1() {
     bind(...args) { return new Stmt(this.sql, args); }
     async first() { return db.prepare(this.sql).get(...this.args) ?? null; }
     async run() { const r = db.prepare(this.sql).run(...this.args); return { meta: { changes: Number(r.changes) } }; }
+    async all() { return { results: db.prepare(this.sql).all(...this.args) }; }
   }
   return { prepare: (sql) => new Stmt(sql), batch: async (list) => Promise.all(list.map((s) => s.run())) };
 }
@@ -25,6 +27,22 @@ let liveEnv = env;
 // A stand-in for Google's sign-in token endpoint (only what Gmail connect uses).
 const google = { codes: new Map(), refresh: new Set(), revoked: [], scope: 'https://www.googleapis.com/auth/gmail.readonly' };
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
+// And Gmail's API: made-up messages, as Gmail's format=full sends them.
+const inboxMail = new Map(); // id -> message
+const b64m = (s) => Buffer.from(s, 'utf8').toString('base64url');
+function gmailMsg(id, from, subject, date, html, extra = []) {
+  inboxMail.set(id, { id, threadId: id, internalDate: String(Date.parse(date)), payload: { mimeType: 'multipart/mixed', filename: '', headers: [{ name: 'From', value: from }, { name: 'Subject', value: subject }, { name: 'Date', value: date }, { name: 'To', value: 'me@example.com' }, { name: 'Received', value: 'from somewhere' }],
+    parts: [{ mimeType: 'text/html', filename: '', headers: [{ name: 'Content-Type', value: 'text/html; charset=UTF-8' }], body: { data: b64m(html) } }, ...extra] } });
+}
+const gmailCalls = [];
+function gmailHandle(url, init) {
+  const out = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  if (!/^Bearer ya29\./.test(init.headers?.Authorization || '')) return out(401, { error: { code: 401 } });
+  gmailCalls.push(url.pathname);
+  if (url.pathname.endsWith('/messages')) return out(200, { messages: [...inboxMail.keys()].reverse().map((id) => ({ id, threadId: id })), resultSizeEstimate: inboxMail.size });
+  const m = inboxMail.get(url.pathname.split('/').pop());
+  return m ? out(200, m) : out(404, { error: { code: 404 } });
+}
 async function googleHandle(path, form) {
   const out = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   if (form.get('client_id') !== 'g-client' && path !== '/revoke') return out(401, { error: 'invalid_client' });
@@ -47,6 +65,7 @@ async function googleHandle(path, form) {
   return out(400, { error: 'unsupported_grant_type' });
 }
 globalThis.fetch = async (url, init = {}) => {
+  if (String(url).startsWith('https://google.test/gmail/')) return gmailHandle(new URL(String(url)), init);
   if (String(url).startsWith('https://google.test/')) return googleHandle(new URL(String(url)).pathname, new URLSearchParams(init.body));
   if (String(url).startsWith(plaid.base)) {
     const r = plaid.handle(new URL(String(url)).pathname, JSON.parse(init.body));
@@ -330,7 +349,9 @@ async function consent(authUrl, { scope, deny = false, cookie = '' } = {}) {
   if (deny) back.searchParams.set('error', 'access_denied'); else back.searchParams.set('code', code);
   return worker.fetch(new Request(back, { headers: cookie ? { Cookie: cookie } : {} }), liveEnv);
 }
-let G, gRefresh;
+let G;
+const KEY = await newMailKey();
+const PUB = publicOf(KEY);
 await test('off until the Google keys are set', async () => {
   G = await cloud.createAccount({ invite: 'family-2026', username: 'mailer', passphrase: 'blue lantern quiet meadow', vault: emptyVault() });
   assert.equal((await cloud.serverStatus()).mail, false);
@@ -340,9 +361,9 @@ await test('off until the Google keys are set', async () => {
 });
 await test('every mail call needs the account’s token', async () => {
   await rejects(cloud.mail('mailer', 'not-the-token', 'link', { challenge: 'x'.repeat(43) }), 'unauthorized');
-  await rejects(cloud.mail('abraar', G.token, 'token', { refreshToken: '1//whatever-long-enough' }), 'unauthorized');
+  await rejects(cloud.mail('abraar', G.token, 'inbox'), 'unauthorized');
 });
-await test('connect: Google’s page, read-only Gmail, PKCE, and the token only reaches the browser', async () => {
+await test('connect: Google’s page, read-only Gmail, PKCE; the sign-in is kept encrypted for the hourly check', async () => {
   const p = await pkcePair();
   const link = await mailLink('mailer', G.token, p.challenge);
   assert.match(link.setCookie, /^__Host-money-mail=[0-9a-f]{64}; Path=\/; Secure; HttpOnly; SameSite=Lax/);
@@ -353,7 +374,7 @@ await test('connect: Google’s page, read-only Gmail, PKCE, and the token only 
   assert.equal(u.searchParams.get('code_challenge_method'), 'S256');
   assert.equal(u.searchParams.get('access_type'), 'offline');
   assert.ok(!link.url.includes('g-secret'));
-  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'pending');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB })).status, 'pending');
   const back = await consent(link.url, { cookie: link.cookie });
   assert.equal(back.status, 302);
   assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html');
@@ -362,33 +383,34 @@ await test('connect: Google’s page, read-only Gmail, PKCE, and the token only 
   assert.ok(row && row.state_hash !== link.state && row.username === 'mailer');
   // Someone else's account, or the wrong verifier, gets nothing.
   const H = await cloud.createAccount({ invite: 'family-2026', username: 'snooper', passphrase: 'red teapot windy harbour', vault: emptyVault() });
-  assert.equal((await cloud.mail('snooper', H.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'expired');
-  const done = await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier });
-  assert.equal(done.status, 'done');
-  assert.match(done.refreshToken, /^1\/\/test-refresh-/);
-  assert.equal(done.accessToken, 'ya29.test-access');
-  gRefresh = done.refreshToken;
-  assert.equal(await env.DB.prepare('SELECT COUNT(*) AS n FROM mail_handoff').first().then((r) => r.n), 0, 'the server keeps nothing');
-  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'expired', 'a code works once');
+  assert.equal((await cloud.mail('snooper', H.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB })).status, 'expired');
+  const done = await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB });
+  assert.deepEqual(done, { status: 'done' }, 'no token goes back out');
+  assert.equal(await env.DB.prepare('SELECT COUNT(*) AS n FROM mail_handoff').first().then((r) => r.n), 0, 'the one-time code is gone');
+  const w = await env.DB.prepare('SELECT * FROM mail_watch WHERE username = ?').bind('mailer').first();
+  const [refresh] = google.refresh;
+  assert.ok(w && !JSON.stringify(w).includes(refresh) && !JSON.stringify(w).includes('test-refresh'), 'the Google sign-in is stored encrypted');
+  assert.deepEqual(JSON.parse(w.pubkey), PUB);
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB })).status, 'expired', 'a code works once');
 });
 await test('a wrong PKCE verifier can’t turn the code into a token', async () => {
   const p = await pkcePair();
   const link = await mailLink('mailer', G.token, p.challenge);
   await consent(link.url, { cookie: link.cookie });
   const other = await pkcePair();
-  await rejects(cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: other.verifier }), 'mail_reconnect');
+  await rejects(cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: other.verifier, publicKey: PUB }), 'mail_reconnect');
 });
 await test('saying no, or unticking Gmail, is reported (and the grant is revoked)', async () => {
   let p = await pkcePair();
   let link = await mailLink('mailer', G.token, p.challenge);
   const back = await consent(link.url, { deny: true, cookie: link.cookie });
   assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
-  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'exited');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB })).status, 'exited');
   p = await pkcePair();
   link = await mailLink('mailer', G.token, p.challenge);
   await consent(link.url, { scope: 'openid', cookie: link.cookie });
   const before = google.revoked.length;
-  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'no_scope');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB })).status, 'no_scope');
   assert.equal(google.revoked.length, before + 1);
 });
 await test('someone else’s sign-in link can’t collect your Gmail (the code only counts in the browser that asked)', async () => {
@@ -397,24 +419,72 @@ await test('someone else’s sign-in link can’t collect your Gmail (the code o
   const link = await mailLink('mailer', G.token, p.challenge);
   const back = await consent(link.url); // no cookie: a different browser
   assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
-  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'other_browser');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier, publicKey: PUB })).status, 'other_browser');
   // A cookie from another link doesn't count either.
   const p2 = await pkcePair();
   const l2 = await mailLink('mailer', G.token, p2.challenge);
   const l3 = await mailLink('snooper', (await cloud.signIn('snooper', 'red teapot windy harbour')).token, p2.challenge);
   await consent(l2.url, { cookie: l3.cookie });
-  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: l2.state, verifier: p2.verifier })).status, 'other_browser');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: l2.state, verifier: p2.verifier, publicKey: PUB })).status, 'other_browser');
 });
 await test('a made-up state at the callback goes nowhere', async () => {
   const r = await worker.fetch(new Request(`https://money.test/api/v1/mail/callback?state=${'ab'.repeat(32)}&code=4/x`), liveEnv);
   assert.equal(r.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
 });
-await test('fresh Gmail access from the saved sign-in; a revoked one asks to reconnect', async () => {
-  const t = await cloud.mail('mailer', G.token, 'token', { refreshToken: gRefresh });
-  assert.equal(t.accessToken, 'ya29.test-access-2');
-  await cloud.mail('mailer', G.token, 'remove', { refreshToken: gRefresh });
-  assert.ok(google.revoked.includes(gRefresh));
-  await rejects(cloud.mail('mailer', G.token, 'token', { refreshToken: gRefresh }), 'mail_reconnect');
+await test('a key that isn’t a public P-256 key is refused', async () => {
+  await rejects(cloud.mail('mailer', G.token, 'finish', { state: 'ab'.repeat(32), verifier: 'x'.repeat(43), publicKey: { ...KEY } }), 'bad_request');
+});
+const D = 'Fri, 09 Oct 2026 12:10:00 -0400';
+await test('check now: alert emails are sealed so only the account’s devices can read them', async () => {
+  gmailMsg('m1', 'CIBC Alerts <alerts@notifications.cibc.com>', 'Transaction alert', D, '<p>A purchase of <b>$12.48</b> was made at <b>TIM HORTONS #4412</b> on October 9, 2026 with your CIBC Visa card ending in 1234.</p>',
+    [{ mimeType: 'application/pdf', filename: 'ad.pdf', headers: [], body: { attachmentId: 'a1' } }]);
+  gmailMsg('m2', 'CIBC <alerts@cibc.com>', 'Your verification code', D, '<p>Your one-time code is 482913.</p>');
+  const r = await cloud.mail('mailer', G.token, 'check');
+  assert.deepEqual([r.fetched, r.more, r.connected, r.problem, r.waiting], [2, false, true, null, 1]);
+  assert.ok(r.lastCheck);
+  const raw = await env.DB.prepare('SELECT box FROM mail_inbox').first();
+  assert.ok(!/TIM HORTONS|Transaction alert|cibc/i.test(raw.box), 'nothing readable on the server');
+  const inbox = await cloud.mail('mailer', G.token, 'inbox');
+  assert.equal(inbox.items.length, 1);
+  const msgs = await openBox(KEY, inbox.items[0].box);
+  assert.equal(msgs.length, 2);
+  assert.ok(!JSON.stringify(msgs).includes('ad.pdf') && !JSON.stringify(msgs).includes('Received'), 'no attachments or extra headers');
+  const parsed = readMessages(msgs, { today: '2026-10-10' });
+  const tim = parsed.find((p) => p.ok);
+  assert.deepEqual([tim.amount, tim.merchant, tim.date, tim.bank], [-12.48, 'Tim Hortons', '2026-10-09', 'CIBC']);
+  assert.equal(parsed.filter((p) => !p.ok).length, 1, 'the code email is read and dropped on the device');
+  const other = await newMailKey();
+  await assert.rejects(openBox(other, inbox.items[0].box), 'another key can’t open it');
+  await cloud.mail('mailer', G.token, 'ack', { ids: inbox.items.map((x) => x.id) });
+  assert.equal((await cloud.mail('mailer', G.token, 'inbox')).items.length, 0, 'deleted once collected');
+});
+await test('every hour: new alerts are fetched once, with the app closed', async () => {
+  gmailMsg('m3', 'TD <alerts@td.com>', 'Purchase alert', D, '<p>You made a purchase of $46.10 at SHOPPERS DRUG MART on Oct 9, 2026 with your TD Visa card.</p>');
+  const run = async () => { const jobs = []; await worker.scheduled({ cron: '17 * * * *' }, liveEnv, { waitUntil: (p) => jobs.push(p) }); await Promise.all(jobs); };
+  gmailCalls.length = 0;
+  await run();
+  assert.deepEqual(gmailCalls.filter((c) => !c.endsWith('/messages')), ['/gmail/v1/users/me/messages/m3'], 'only the new email is fetched');
+  const inbox = await cloud.mail('mailer', G.token, 'inbox');
+  const msgs = await openBox(KEY, inbox.items[0].box);
+  assert.deepEqual(msgs.map((m) => m.id), ['m3']);
+  await cloud.mail('mailer', G.token, 'ack', { ids: inbox.items.map((x) => x.id) });
+  await run();
+  assert.equal((await cloud.mail('mailer', G.token, 'inbox')).items.length, 0, 'nothing new, nothing sealed');
+  // Someone else's account sees none of it.
+  await rejects(cloud.mail('snooper', (await cloud.signIn('snooper', 'red teapot windy harbour')).token, 'check'), 'mail_not_connected');
+});
+await test('a sign-in Google ended asks to reconnect; disconnecting revokes it and deletes everything', async () => {
+  const [refresh] = google.refresh;
+  google.refresh.delete(refresh);
+  const r = await cloud.mail('mailer', G.token, 'check');
+  assert.equal(r.problem, 'login');
+  google.refresh.add(refresh);
+  gmailMsg('m4', 'TD <alerts@td.com>', 'Purchase alert', D, '<p>You made a purchase of $5.00 at A&amp;W on Oct 9, 2026.</p>');
+  await cloud.mail('mailer', G.token, 'check'); // leaves a sealed box waiting
+  await cloud.mail('mailer', G.token, 'remove');
+  assert.ok(google.revoked.includes(refresh));
+  assert.equal(await env.DB.prepare('SELECT COUNT(*) AS n FROM mail_watch').first().then((x) => x.n), 0);
+  assert.equal(await env.DB.prepare('SELECT COUNT(*) AS n FROM mail_inbox').first().then((x) => x.n), 0);
   liveEnv = env;
 });
 

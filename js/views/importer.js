@@ -90,12 +90,12 @@ export function openImporter({ welcome = false } = {}) {
       </label>
       ${!files.length ? `<div class="list-head"><span>Other ways to add</span></div>
       <div class="list">
+        <button class="row with-icon tap" data-act="mail"><span class="cat-icon sm" style="--c:var(--indigo)">${icon('envelope')}</span>
+          <span class="main"><span class="title">Bank Emails</span><span class="subtitle">${app.vault.mail?.pending?.length ? `${app.vault.mail.pending.length} to check` : 'Gmail, checked every hour: no statements needed'}</span></span>${icon('chev-r', 'chev')}</button>
         <button class="row with-icon tap" data-act="bank"><span class="cat-icon sm" style="--c:var(--blue)">${icon('arrows')}</span>
           <span class="main"><span class="title">${app.vault.bank?.accessToken ? 'Sync From Your Bank' : 'Connect Your Bank'}</span><span class="subtitle">${app.vault.bank?.accessToken ? `${esc(app.vault.bank.institution || 'Connected')} · new transactions come in on their own` : 'New transactions come in on their own'}</span></span>${icon('chev-r', 'chev')}</button>
         <button class="row with-icon tap" data-act="amazon"><span class="cat-icon sm" style="--c:var(--orange)">${icon('box')}</span>
           <span class="main"><span class="title">Amazon Orders</span><span class="subtitle">See what each Amazon charge bought</span></span>${icon('chev-r', 'chev')}</button>
-        <button class="row with-icon tap" data-act="mail"><span class="cat-icon sm" style="--c:var(--indigo)">${icon('envelope')}</span>
-          <span class="main"><span class="title">Bank Emails</span><span class="subtitle">${app.vault.mail?.pending?.length ? `${app.vault.mail.pending.length} to check` : 'Add purchases from your bank’s email alerts'}</span></span>${icon('chev-r', 'chev')}</button>
       </div>` : ''}
       ${pendingOrErr.map(fileCard).join('')}
       <div id="imp-items">${all.map(card).join('')}</div>

@@ -580,11 +580,12 @@ function enter({ session, vault, demo, firstRun = false }) {
   selectTab(app.tab || 'overview', { force: true });
   startAutoLock();
   haptic();
-  if (firstRun) setTimeout(() => import('./views/importer.js').then((m) => m.openImporter({ welcome: true })), 600);
+  // A new account starts with Gmail (no statements needed); without accounts, with statement files.
+  if (firstRun) setTimeout(() => (app.account ? import('./views/mail.js').then((m) => m.openMail()) : import('./views/importer.js').then((m) => m.openImporter({ welcome: true }))), 600);
   if (app.account && !demo) {
     pullLatest().then(offerUnsynced)
       .then(() => (app.vault?.bank && !app.demo ? import('./views/bank.js').then((m) => m.maybeAutoSync()) : null))
-      .then(() => (app.vault?.mail?.refresh && !app.demo ? import('./views/mail.js').then((m) => m.maybeAutoCheck()) : null));
+      .then(() => (app.vault?.mail?.connected && !app.demo ? import('./views/mail.js').then((m) => m.maybeAutoCheck()) : null));
   }
 }
 
