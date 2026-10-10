@@ -377,73 +377,95 @@ function growIn(wrap) {
 }
 
 // ---------------------------------------------------------------------------
-// Category bars (Spending tab, like Apple Card): one bar per day or month, stacked by category
+// Running total for a month against last month (and the budget): drag to read any day
 // ---------------------------------------------------------------------------
 /**
- * bars: [{ key, label, title, total (cents), rows: [{cat, cents}] }]
- * opts: { order: [catId] (stack order; the rest is "Other"), selected: key|null, onSelect(key|null), avg (cents), every: label step }
+ * cur, prev: running totals in cents per day (cur may end early with nulls: days still to come).
+ * opts: { budget (cents), color, curLabel, prevLabel, dayLabel(i) -> text, onScrub(i|null) }
  */
-export function categoryBars(wrap, bars, { order = [], selected = null, onSelect, avg = null, every = 1, height = 196 } = {}) {
+export function cumulativeChart(wrap, { cur, prev = [], budget = null, color = 'blue', curLabel = 'This month', prevLabel = 'Last month', dayLabel = (i) => `Day ${i + 1}` } = {}) {
   const W = Math.max(280, wrap.clientWidth || 320);
-  const H = height;
-  const pad = { t: 24, r: 44, b: 24, l: 2 };
+  const H = 196;
+  const pad = { t: 16, r: 46, b: 24, l: 6 };
   const iw = W - pad.l - pad.r;
   const ih = H - pad.t - pad.b;
-  // One huge day (rent on the 1st) would flatten every other bar: cap the scale and cut that bar.
-  const sorted = bars.map((b) => b.total).sort((a, b) => b - a);
-  const cap = bars.length > 3 && sorted[1] > 0 && sorted[0] > sorted[1] * 2.5 ? Math.max(sorted[1] * 1.45, avg || 0) : null;
-  const maxV = Math.max(1, cap ?? sorted[0] ?? 0, avg || 0) / 100;
+  // The days of this month set the axis; last month is drawn for as many of its days as fit.
+  const n = Math.max(cur.length, 2);
+  prev = prev.slice(0, n);
+  const curVals = cur.filter((v) => v != null);
+  const maxV = Math.max(1, ...curVals, ...prev, budget || 0) / 100;
   const step = niceStep(maxV, 3);
-  const top = Math.ceil((maxV * 1.04) / step) * step;
-  const Y = (v) => pad.t + ih * (1 - v / top);
-  const band = iw / bars.length;
-  const bw = Math.max(3, Math.min(22, band * (bars.length > 20 ? 0.66 : 0.58)));
-  const radius = Math.min(bars.length > 20 ? 2.5 : 5, bw / 2);
+  const top = Math.ceil((maxV * 1.06) / step) * step;
+  const X = (i) => pad.l + (iw * i) / (n - 1);
+  const Y = (c) => pad.t + ih * (1 - Math.max(0, c) / 100 / top);
+  const line = (arr) => arr.map((v, i) => (v == null ? null : `${X(i).toFixed(1)},${Y(v).toFixed(1)}`)).filter(Boolean);
   let g = '';
   for (let v = step; v <= top + 1e-9; v += step) {
-    g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(v)}" y2="${Y(v)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
-    g += `<text class="chart-axis" x="${W - 2}" y="${Y(v) + 4}" text-anchor="end">${moneyShort(v)}</text>`;
+    g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(v * 100)}" y2="${Y(v * 100)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
+    g += `<text class="chart-axis" x="${W - 2}" y="${Y(v * 100) + 4}" text-anchor="end">${moneyShort(v)}</text>`;
   }
   g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(0)}" y2="${Y(0)}" style="stroke:var(--separator)" stroke-width="1" shape-rendering="crispEdges"/>`;
-  bars.forEach((b, i) => {
-    const cx = pad.l + band * i + band / 2;
-    const x = cx - bw / 2;
-    const dim = selected != null && selected !== b.key;
-    const parts = [];
-    let other = 0;
-    for (const r of b.rows) { if (order.includes(r.cat.id)) parts.push(r); else other += r.cents; }
-    parts.sort((a, c) => order.indexOf(a.cat.id) - order.indexOf(c.cat.id));
-    if (other > 0) parts.push({ cat: { color: 'gray' }, cents: other });
-    let y0 = Y(0);
-    const segs = [];
-    const cut = cap && b.total > cap;
-    const scale = cut ? (top * 100 * 0.97) / b.total : 1;
-    parts.forEach((p, k) => {
-      const h = (ih * p.cents * scale) / 100 / top;
-      if (h <= 0) return;
-      const isTop = k === parts.length - 1;
-      const gap = isTop || h < 3 ? 0 : 1.5;
-      const yTop = y0 - h;
-      if (isTop) {
-        const r = Math.min(radius, h);
-        segs.push(`<path d="M${x},${y0}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + bw - r}Q${x + bw},${yTop} ${x + bw},${yTop + r}V${y0}Z" style="fill:var(--${p.cat.color})"/>`);
-      } else segs.push(`<rect x="${x}" y="${yTop + gap}" width="${bw}" height="${Math.max(0, h - gap)}" style="fill:var(--${p.cat.color})"/>`);
-      y0 = yTop;
-    });
-    const showLabel = i % every === 0 || b.key === selected;
-    g += `<g class="cb" data-key="${esc(b.key)}" style="opacity:${dim ? 0.3 : 1};transition:opacity 220ms;cursor:pointer">
-      <title>${esc(b.title)}: ${money(b.total / 100)}</title>
-      <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 36}" fill="transparent"/>
-      <g class="stack">${segs.join('')}${cut ? `<path d="M${x - 1},${Y(top * 0.62) + 2}L${x + bw + 1},${Y(top * 0.62) - 2}" style="stroke:var(--bg-2);stroke-width:3"/>` : ''}</g>
-      ${cut ? `<text class="chart-axis" x="${cx}" y="${pad.t - 8}" text-anchor="middle" style="fill:var(--label);font-weight:600">${moneyShort(b.total / 100)}</text>` : ''}
-      ${showLabel ? `<text class="chart-axis" x="${cx}" y="${H - 6}" text-anchor="middle" style="${b.key === selected ? 'fill:var(--label);font-weight:700' : ''}">${esc(b.label)}</text>` : ''}</g>`;
-  });
-  if (avg) {
-    const y = Y(avg / 100);
-    g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${y}" y2="${y}" style="stroke:var(--label-2)" stroke-width="1.2" stroke-dasharray="3 4"/>
-      <text class="chart-axis" x="${pad.l + 2}" y="${y - 5}" text-anchor="start" style="fill:var(--label-2);font-weight:600;paint-order:stroke;stroke:var(--bg-2);stroke-width:4px;stroke-linejoin:round">Avg</text>`;
+  for (const i of [0, 7, 14, 21, n - 1]) if (i < n) g += `<text class="chart-axis" x="${X(i)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${i + 1}</text>`;
+  if (budget) {
+    g += `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(budget)}" y2="${Y(budget)}" style="stroke:var(--label-2)" stroke-width="1.3" stroke-dasharray="4 4"/>
+      <text class="chart-axis" x="${pad.l + 2}" y="${Y(budget) - 6}" style="fill:var(--label-2);font-weight:600;paint-order:stroke;stroke:var(--bg-2);stroke-width:4px;stroke-linejoin:round">Budget</text>`;
   }
-  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(bars.map((b) => `${b.title}: ${money(b.total / 100)}`).join(', '))}">${g}</svg>`;
-  if (!reducedMotion()) growIn(wrap);
-  wrap.querySelectorAll('.cb').forEach((c) => c.addEventListener('click', () => { haptic(); onSelect?.(c.dataset.key === selected ? null : c.dataset.key); }));
+  const pp = line(prev);
+  if (pp.length > 1) g += `<path d="M${pp.join('L')}" fill="none" style="stroke:var(--label-3)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const cp = line(cur);
+  const lastI = cur.reduce((a, v, i) => (v != null ? i : a), -1);
+  if (cp.length > 1) {
+    g += `<defs><linearGradient id="cumFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--${color})" stop-opacity=".22"/><stop offset="1" style="stop-color:var(--${color})" stop-opacity="0"/></linearGradient></defs>
+      <path d="M${cp[0].split(',')[0]},${Y(0)}L${cp.join('L')}L${X(lastI)},${Y(0)}Z" fill="url(#cumFill)"/>
+      <path class="cum-line" d="M${cp.join('L')}" fill="none" style="stroke:var(--${color})" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }
+  if (lastI >= 0) g += `<circle cx="${X(lastI)}" cy="${Y(cur[lastI])}" r="4.5" style="fill:var(--${color});stroke:var(--bg-2)" stroke-width="2.5"/>`;
+  g += `<g class="cum-scrub" style="opacity:0"><line class="cs-l" y1="${pad.t - 4}" y2="${Y(0)}" style="stroke:var(--label-3)" stroke-width="1"/>
+    <circle class="cs-p" r="4" style="fill:var(--label-3)"/><circle class="cs-c" r="5" style="fill:var(--${color});stroke:var(--bg-2)" stroke-width="2"/></g>`;
+  wrap.innerHTML = `<div class="cum-read"><span class="k"></span><span class="v"></span></div>
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(`${curLabel}: ${money((cur[lastI] || 0) / 100)} so far${pp.length ? `; ${prevLabel}: ${money((prev[prev.length - 1] || 0) / 100)}` : ''}`)}">${g}</svg>
+    <div class="cum-legend"><span><i style="--c:var(--${color})"></i>${esc(curLabel)}</span>${pp.length > 1 ? `<span><i style="--c:var(--label-3)"></i>${esc(prevLabel)}</span>` : ''}${budget ? '<span><i class="dash"></i>Budget</span>' : ''}</div>`;
+  const svg = wrap.querySelector('svg');
+  const k = wrap.querySelector('.cum-read .k');
+  const v = wrap.querySelector('.cum-read .v');
+  const scrub = svg.querySelector('.cum-scrub');
+  const show = (i) => {
+    if (i == null) {
+      scrub.style.opacity = 0;
+      k.textContent = lastI >= 0 ? dayLabel(lastI) : '';
+      v.innerHTML = lastI >= 0 ? `${money((cur[lastI] || 0) / 100)}${prev.length ? ` <small>· ${esc(prevLabel)} by then ${money((prev[Math.min(lastI, prev.length - 1)] || 0) / 100)}</small>` : ''}` : '';
+      return;
+    }
+    const c = cur[i], p = prev[Math.min(i, prev.length - 1)];
+    scrub.style.opacity = 1;
+    scrub.querySelector('.cs-l').setAttribute('x1', X(i)); scrub.querySelector('.cs-l').setAttribute('x2', X(i));
+    const cc = scrub.querySelector('.cs-c'), pc = scrub.querySelector('.cs-p');
+    cc.style.display = c == null ? 'none' : ''; if (c != null) { cc.setAttribute('cx', X(i)); cc.setAttribute('cy', Y(c)); }
+    pc.style.display = p == null || !prev.length ? 'none' : ''; if (p != null) { pc.setAttribute('cx', X(i)); pc.setAttribute('cy', Y(p)); }
+    k.textContent = dayLabel(i);
+    v.innerHTML = `${c != null ? money(c / 100) : '—'}${prev.length && p != null ? ` <small>· ${esc(prevLabel)} ${money(p / 100)}</small>` : ''}`;
+  };
+  show(null);
+  const at = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    return Math.max(0, Math.min(n - 1, Math.round((((clientX - r.left) / r.width) * W - pad.l) / iw * (n - 1))));
+  };
+  let down = false, lastShown = -1;
+  const move = (x) => { const i = at(x); if (i !== lastShown) { if (lastShown !== -1) haptic(); lastShown = i; show(i); } };
+  svg.addEventListener('pointerdown', (e) => { down = true; move(e.clientX); });
+  svg.addEventListener('pointermove', (e) => { if (down || e.pointerType === 'mouse') move(e.clientX); });
+  const end = () => { down = false; lastShown = -1; show(null); };
+  svg.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') setTimeout(end, 1400); else down = false; });
+  svg.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') end(); });
+  svg.addEventListener('pointercancel', end);
+  if (!reducedMotion()) {
+    const path = svg.querySelector('.cum-line');
+    if (path) {
+      const L = path.getTotalLength?.() || 0;
+      if (L) {
+        path.style.strokeDasharray = `${L}`; path.style.strokeDashoffset = `${L}`;
+        whenSettled(wrap, () => requestAnimationFrame(() => { path.style.transition = 'stroke-dashoffset 700ms cubic-bezier(.2,.8,.2,1)'; path.style.strokeDashoffset = '0'; }));
+      }
+    }
+  }
 }
