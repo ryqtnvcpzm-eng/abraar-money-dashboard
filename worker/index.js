@@ -21,19 +21,26 @@
 //   POST   /api/v1/accounts/:user/bank/remove  Bearer token { accessToken } -> 204
 //   POST   /api/v1/accounts/:user/mail/link    Bearer token { challenge } -> { state, url }
 //   GET    /api/v1/mail/callback               (Google sends the browser here) -> 302 /mail-done.html
-//   POST   /api/v1/accounts/:user/mail/finish  Bearer token { state, verifier } -> { status, refreshToken?, accessToken?, expiresIn? }
-//   POST   /api/v1/accounts/:user/mail/token   Bearer token { refreshToken } -> { accessToken, expiresIn }
-//   POST   /api/v1/accounts/:user/mail/remove  Bearer token { refreshToken } -> 204
+//   POST   /api/v1/accounts/:user/mail/finish  Bearer token { state, verifier, publicKey } -> { status }
+//   POST   /api/v1/accounts/:user/mail/check   Bearer token -> { fetched, more, connected, lastCheck, problem, waiting }
+//   POST   /api/v1/accounts/:user/mail/inbox   Bearer token -> { items: [{ id, box }], connected, lastCheck, problem, waiting }
+//   POST   /api/v1/accounts/:user/mail/ack     Bearer token { ids } -> 204
+//   POST   /api/v1/accounts/:user/mail/remove  Bearer token -> 204
+//   (scheduled, hourly)                         checks every connected Gmail
 //
 // Bank sync (optional, Plaid): the browser keeps the Plaid access token inside its encrypted vault and
 // sends it with each sync. The Worker adds the Plaid secret, relays the call and keeps nothing:
 // transactions pass through in memory only. Account numbers (even Plaid's last-4 "mask") are dropped.
 //
 // Bank emails (optional, Gmail): Google signs you in and sends a one-time code here, which waits (for at
-// most 15 minutes, under a hash of a random state) until the app collects it. Turning the code into a
-// token needs both the Google client secret (here) and a PKCE verifier only the app has. The long-lived
-// token then lives in the encrypted vault like the Plaid one. Email is read by the browser, straight from
-// Gmail: no email ever passes through this Worker.
+// most 15 minutes, under a hash of a random state, and only for the browser that asked) until the app
+// collects it. Turning the code into a token needs both the Google client secret (here) and a PKCE verifier
+// only the app has. So that Gmail can be checked every hour with the app closed, the Worker keeps the
+// Google sign-in, encrypted with a key derived from its secret. Each hour it searches Gmail (read-only) for
+// alert-like emails, keeps only their sender, subject, date and text, and seals them to the account's
+// public key (ECDH P-256 + AES-GCM); the private key lives only in the encrypted vault, so only the
+// account's own devices can read them. The app reads them when it opens, adds the transactions to the
+// vault, and the sealed copies are deleted.
 //
 // Recovery: the browser can wrap the vault key with a random recovery key the owner saves
 // (AES-GCM, key from HKDF of the recovery key). The server only stores that wrapped blob, which is
@@ -73,6 +80,10 @@ async function ensureSchema(db) {
     db.prepare('CREATE TABLE IF NOT EXISTS recovery (username TEXT PRIMARY KEY, blob TEXT NOT NULL, updated_at TEXT NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS mail_handoff (state_hash TEXT PRIMARY KEY, username TEXT NOT NULL, browser_hash TEXT NOT NULL, code TEXT, error TEXT, created INTEGER NOT NULL)'),
+    db.prepare(`CREATE TABLE IF NOT EXISTS mail_watch (username TEXT PRIMARY KEY, token_enc TEXT NOT NULL, pubkey TEXT NOT NULL, last_check TEXT,
+      seen TEXT NOT NULL, problem TEXT, last_run INTEGER NOT NULL, connected_at TEXT NOT NULL)`),
+    db.prepare('CREATE TABLE IF NOT EXISTS mail_inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, box TEXT NOT NULL, created INTEGER NOT NULL)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS mail_inbox_user ON mail_inbox (username, id)'),
   ]);
   // A random secret made once per site, for the fake answers about unknown usernames.
   const fresh = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -274,7 +285,7 @@ async function bankRoute(action, req, env, url, username) {
 }
 
 // ---------------------------------------------------------------------------
-// Bank emails through Gmail (Google sign-in; the browser reads the mail itself)
+// Bank emails through Gmail: Google sign-in, then a check every hour (and on demand)
 // ---------------------------------------------------------------------------
 const mailOn = (env) => !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
@@ -286,7 +297,6 @@ const googleUrl = (env, what) => {
 };
 const STATE_RE = /^[0-9a-f]{64}$/;
 const PKCE_RE = /^[A-Za-z0-9_-]{43,128}$/;
-const REFRESH_RE = /^[\w./~+-]{20,512}$/;
 const HANDOFF_TTL = 15 * 60; // seconds
 
 async function google(env, what, form) {
@@ -357,7 +367,7 @@ async function mailRoute(action, req, env, url, username) {
     return res;
   }
   if (action === 'finish') {
-    if (typeof b.state !== 'string' || !STATE_RE.test(b.state) || typeof b.verifier !== 'string' || !PKCE_RE.test(b.verifier)) return err(400, 'bad_request');
+    if (typeof b.state !== 'string' || !STATE_RE.test(b.state) || typeof b.verifier !== 'string' || !PKCE_RE.test(b.verifier) || !validPublicKey(b.publicKey)) return err(400, 'bad_request');
     const hash = await sha256hex(b.state);
     await db.prepare('DELETE FROM mail_handoff WHERE created < ?').bind(now - HANDOFF_TTL).run();
     const row = await db.prepare('SELECT code, error, created FROM mail_handoff WHERE state_hash = ? AND username = ?').bind(hash, username).first();
@@ -377,19 +387,198 @@ async function mailRoute(action, req, env, url, username) {
       return json({ status: 'no_scope' });
     }
     if (!t.refresh_token) return err(502, 'mail_error', { google: 'no_refresh_token' });
-    return json({ status: 'done', refreshToken: t.refresh_token, accessToken: t.access_token, expiresIn: t.expires_in || 3600 });
+    // Kept here (encrypted) so the hourly check can run while the app is closed; never sent back out.
+    const old = await db.prepare('SELECT token_enc FROM mail_watch WHERE username = ?').bind(username).first();
+    await db.prepare(`INSERT OR REPLACE INTO mail_watch (username, token_enc, pubkey, last_check, seen, problem, last_run, connected_at)
+      VALUES (?, ?, ?, (SELECT last_check FROM mail_watch WHERE username = ?), COALESCE((SELECT seen FROM mail_watch WHERE username = ?), '[]'), NULL, 0, ?)`)
+      .bind(username, await sealToken(env, username, t.refresh_token), JSON.stringify(b.publicKey), username, username, new Date().toISOString()).run();
+    if (old) { const prev = await openToken(env, username, old.token_enc).catch(() => null); if (prev && prev !== t.refresh_token) await google(env, 'revoke', { token: prev }).catch(() => {}); }
+    return json({ status: 'done' });
   }
-  if (action === 'token') {
-    if (typeof b.refreshToken !== 'string' || !REFRESH_RE.test(b.refreshToken)) return err(400, 'bad_request');
-    const t = await google(env, 'token', { refresh_token: b.refreshToken, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, grant_type: 'refresh_token' });
-    return json({ accessToken: t.access_token, expiresIn: t.expires_in || 3600 });
+  const watch = await db.prepare('SELECT * FROM mail_watch WHERE username = ?').bind(username).first();
+  if (action === 'check') {
+    if (!watch) return err(404, 'mail_not_connected');
+    const r = await checkMail(env, watch, { n: 40 });
+    return json({ ...r, ...await mailStatus(db, username) });
+  }
+  if (action === 'inbox') {
+    // A few boxes at a time (each holds up to ~400 KB); ask again while `more`.
+    const rows = (await db.prepare('SELECT id, box FROM mail_inbox WHERE username = ? ORDER BY id LIMIT 5').bind(username).all()).results || [];
+    return json({ items: rows.map((r) => ({ id: r.id, box: JSON.parse(r.box) })), ...await mailStatus(db, username) });
+  }
+  if (action === 'ack') {
+    const ids = Array.isArray(b.ids) ? b.ids.filter((x) => Number.isInteger(x)).slice(0, 100) : [];
+    if (ids.length) await db.prepare(`DELETE FROM mail_inbox WHERE username = ? AND id IN (${ids.map(() => '?').join(',')})`).bind(username, ...ids).run();
+    return json(null, 204);
   }
   if (action === 'remove') {
-    if (typeof b.refreshToken !== 'string' || !REFRESH_RE.test(b.refreshToken)) return err(400, 'bad_request');
-    await google(env, 'revoke', { token: b.refreshToken }).catch(() => {});
+    if (watch) { const tok = await openToken(env, username, watch.token_enc).catch(() => null); if (tok) await google(env, 'revoke', { token: tok }).catch(() => {}); }
+    await db.batch([db.prepare('DELETE FROM mail_watch WHERE username = ?').bind(username), db.prepare('DELETE FROM mail_inbox WHERE username = ?').bind(username)]);
     return json(null, 204);
   }
   return err(404, 'not_found');
+}
+
+async function mailStatus(db, username) {
+  const w = await db.prepare('SELECT last_check, problem, connected_at FROM mail_watch WHERE username = ?').bind(username).first();
+  const n = await db.prepare('SELECT COUNT(*) AS n FROM mail_inbox WHERE username = ?').bind(username).first();
+  return { connected: !!w, lastCheck: w?.last_check || null, problem: w?.problem || null, waiting: n?.n || 0 };
+}
+
+// The Google sign-in, encrypted at rest with a key only the Worker has (from GOOGLE_CLIENT_SECRET), and bound
+// to the username, so the database alone is no use to anyone.
+async function tokenKey(env) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(String(env.GOOGLE_CLIENT_SECRET)), 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode('money/mail-token/v1') }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+const b64e = (bytes) => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
+const b64d = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function sealToken(env, username, token) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(username) }, await tokenKey(env), enc.encode(token)));
+  return `${b64e(iv)}.${b64e(ct)}`;
+}
+async function openToken(env, username, sealed) {
+  const [iv, ct] = String(sealed).split('.');
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv), additionalData: enc.encode(username) }, await tokenKey(env), b64d(ct)));
+}
+
+/** A P-256 public key (JWK) from the app: only its own key pair's devices can open what's sealed to it. */
+const validPublicKey = (k) => !!k && typeof k === 'object' && k.kty === 'EC' && k.crv === 'P-256' && !('d' in k)
+  && /^[A-Za-z0-9_-]{43}$/.test(k.x || '') && /^[A-Za-z0-9_-]{43}$/.test(k.y || '');
+
+/** Seal JSON to the account's public key: ECDH (P-256, a fresh key each time) → HKDF → AES-GCM. */
+async function sealBox(pubJwk, data) {
+  const pub = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: pubJwk.x, y: pubJwk.y }, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const eph = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, eph.privateKey, 256);
+  const hk = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: enc.encode('money/mail-box/v1') }, hk, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(data))));
+  const epk = await crypto.subtle.exportKey('jwk', eph.publicKey);
+  return { v: 1, epk: { x: epk.x, y: epk.y }, iv: b64e(iv), ct: b64e(ct) };
+}
+
+const gmailBase = (env) => (googleBase(env) ? `${googleBase(env)}/gmail/v1/users/me` : 'https://gmail.googleapis.com/gmail/v1/users/me');
+async function gmail(env, token, path) {
+  let res;
+  try { res = await fetch(`${gmailBase(env)}/${path}`, { headers: { Authorization: `Bearer ${token}` } }); } catch { throw Object.assign(new Error('mail_unreachable'), { status: 502 }); }
+  if (res.status === 403) throw Object.assign(new Error('mail_forbidden'), { status: 502 });
+  if (!res.ok) throw Object.assign(new Error('mail_error'), { status: 502, extra: { google: String(res.status) } });
+  return res.json();
+}
+
+/**
+ * The Gmail search: words money alerts use (Gmail ORs the words in braces), since the last check (or the last
+ * 60 days the first time), leaving out the Promotions and Social tabs.
+ */
+export function alertQuery(since) {
+  const words = '{transaction purchase purchased spent charged charge withdrawal withdrawn deposit deposited refund refunded debited credited "e-transfer" etransfer "sent you" "you sent" "you paid" "payment received" alert}';
+  const s = since ? Date.parse(since) : NaN;
+  const when = Number.isFinite(s) ? `after:${Math.floor(s / 1000) - 2 * 86400}` : 'newer_than:60d';
+  return `${words} ${when} -category:promotions -category:social`;
+}
+
+/** Only what reading an alert needs: sender, subject, date and the text parts (no attachments). */
+function prune(msg) {
+  const keep = new Set(['from', 'subject', 'date', 'content-type', 'message-id']);
+  const part = (p, depth) => {
+    if (!p || depth > 8) return null;
+    const out = { mimeType: p.mimeType || '', headers: (p.headers || []).filter((h) => keep.has(String(h.name).toLowerCase())) };
+    if (p.parts?.length) { out.parts = p.parts.map((x) => part(x, depth + 1)).filter(Boolean); return out; }
+    if (p.filename || !/^text\/(plain|html)/i.test(p.mimeType || '')) return depth ? null : out;
+    out.body = { data: String(p.body?.data || '').slice(0, 200_000) };
+    return out;
+  };
+  return { id: String(msg.id), internalDate: msg.internalDate || null, payload: part(msg.payload, 0) };
+}
+
+const BOX_BYTES = 400_000;
+const INBOX_MAX = 300; // boxes waiting for the app; checks pause past this until it collects them
+/**
+ * Look for new alert emails for one account and seal them for its devices. budget.n: Gmail calls left in this
+ * run (Workers allow 50 outside requests per run). Returns { fetched, more }.
+ */
+export async function checkMail(env, watch, budget) {
+  const db = env.DB;
+  const started = new Date().toISOString();
+  const done = (fields) => db.prepare('UPDATE mail_watch SET last_run = ?, problem = ?, last_check = ?, seen = ? WHERE username = ?')
+    .bind(Math.floor(Date.now() / 1000), fields.problem ?? null, fields.lastCheck ?? watch.last_check, fields.seen ?? watch.seen, watch.username).run();
+  const waiting = await db.prepare('SELECT COUNT(*) AS n FROM mail_inbox WHERE username = ?').bind(watch.username).first();
+  if ((waiting?.n || 0) >= INBOX_MAX) { await done({ problem: watch.problem }); return { fetched: 0, more: false, full: true }; }
+  let access;
+  try {
+    budget.n--;
+    access = (await google(env, 'token', { refresh_token: await openToken(env, watch.username, watch.token_enc), client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, grant_type: 'refresh_token' })).access_token;
+  } catch (e) {
+    if (e.message === 'mail_reconnect') { await done({ problem: 'login' }); return { fetched: 0, more: false }; }
+    throw e;
+  }
+  let seen;
+  try { seen = JSON.parse(watch.seen); } catch { seen = []; }
+  const seenSet = new Set(seen);
+  const q = encodeURIComponent(alertQuery(watch.last_check));
+  const ids = [];
+  let page = '', more = false;
+  try {
+    for (;;) {
+      if (budget.n <= 1) { more = true; break; }
+      budget.n--;
+      const list = await gmail(env, access, `messages?q=${q}&maxResults=100${page ? `&pageToken=${encodeURIComponent(page)}` : ''}`);
+      for (const m of list.messages || []) if (!seenSet.has(m.id) && !ids.includes(m.id)) ids.push(m.id);
+      if (!list.nextPageToken) break;
+      if (ids.length >= budget.n) { more = true; break; }
+      page = list.nextPageToken;
+    }
+  } catch (e) {
+    if (e.message === 'mail_forbidden') { await done({ problem: 'forbidden' }); return { fetched: 0, more: false }; }
+    throw e;
+  }
+  const take = ids.slice(0, Math.max(0, budget.n));
+  if (take.length < ids.length) more = true;
+  budget.n -= take.length;
+  // Newest first from Gmail; a few at a time.
+  const msgs = [];
+  const queue = [...take];
+  await Promise.all(Array.from({ length: 5 }, async () => {
+    while (queue.length) { const id = queue.shift(); msgs.push(prune(await gmail(env, access, `messages/${encodeURIComponent(id)}?format=full`))); }
+  }));
+  const pub = JSON.parse(watch.pubkey);
+  let batch = [], size = 0;
+  const flush = async () => {
+    if (!batch.length) return;
+    await db.prepare('INSERT INTO mail_inbox (username, box, created) VALUES (?, ?, ?)').bind(watch.username, JSON.stringify(await sealBox(pub, batch)), Math.floor(Date.now() / 1000)).run();
+    batch = []; size = 0;
+  };
+  for (const m of msgs) {
+    const n = JSON.stringify(m).length;
+    if (size + n > BOX_BYTES) await flush();
+    batch.push(m); size += n;
+  }
+  await flush();
+  // Remember which emails were handed over (Gmail's ids only), so they're never fetched twice.
+  const nextSeen = JSON.stringify([...seen, ...take].slice(-4000));
+  await done({ lastCheck: more ? watch.last_check : started, seen: nextSeen });
+  return { fetched: take.length, more };
+}
+
+/** Every hour (Cron Trigger): check each connected account, least recently checked first. */
+export async function runMailChecks(env) {
+  if (!env.DB || !mailOn(env)) return;
+  await ensureSchema(env.DB);
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM mail_inbox WHERE created < ?').bind(now - 60 * 86400),
+    env.DB.prepare('DELETE FROM mail_handoff WHERE created < ?').bind(now - HANDOFF_TTL),
+  ]);
+  const rows = (await env.DB.prepare('SELECT * FROM mail_watch ORDER BY last_run LIMIT 20').all()).results || [];
+  const budget = { n: 45 };
+  for (const w of rows) {
+    if (budget.n < 4) break;
+    if (w.problem === 'login') continue;
+    try { await checkMail(env, w, budget); } catch { /* one account's trouble doesn't stop the others */ }
+  }
 }
 
 export async function handleApi(req, env, url) {
@@ -423,7 +612,7 @@ export async function handleApi(req, env, url) {
     return json({ username, rev: b.envelope.rev }, 201);
   }
 
-  const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery|\/bank\/(?:link|finish|sync|remove)|\/mail\/(?:link|finish|token|remove))?$/.exec(path);
+  const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery|\/bank\/(?:link|finish|sync|remove)|\/mail\/(?:link|finish|check|inbox|ack|remove))?$/.exec(path);
   if (!m) return err(404, 'not_found');
   let username;
   try { username = decodeURIComponent(m[1]).toLowerCase(); } catch { return err(400, 'bad_username'); }
@@ -492,6 +681,8 @@ export async function handleApi(req, env, url) {
       db.prepare("DELETE FROM failures WHERE username LIKE ? ESCAPE '\\'").bind(`${username.replace(/[%_\\]/g, '\\$&')}|%`),
       db.prepare('DELETE FROM recovery WHERE username = ?').bind(username),
       db.prepare('DELETE FROM mail_handoff WHERE username = ?').bind(username),
+      db.prepare('DELETE FROM mail_watch WHERE username = ?').bind(username),
+      db.prepare('DELETE FROM mail_inbox WHERE username = ?').bind(username),
     ]);
     return json(null, 204);
   }
@@ -499,6 +690,9 @@ export async function handleApi(req, env, url) {
 }
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runMailChecks(env));
+  },
   async fetch(req, env) {
     const url = new URL(req.url);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS ? env.ASSETS.fetch(req) : new Response('Not found', { status: 404 });

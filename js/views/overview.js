@@ -46,17 +46,17 @@ export function renderOverview(page) {
     ${comingUp(m)}
     <div class="section-head"><h2>Accounts</h2></div>
     <div class="list">
+      ${!app.demo && (app.vault.mail?.connected || app.vault.mail?.pending?.length) ? `<button class="row with-icon tap" data-act="mail">
+        <span class="cat-icon sm" style="--c:var(--${app.vault.mail.problem ? 'orange' : 'indigo'})">${icon('envelope')}</span>
+        <span class="main"><span class="title">Bank Emails</span>
+        <span class="subtitle">${app.vault.mail.problem === 'login' ? 'Needs you to sign in to Gmail again' : app.vault.mail.pending?.length ? `${plural(app.vault.mail.pending.length, 'transaction')} to check` : app.vault.mail.lastCheck ? `Checked ${esc(new Date(app.vault.mail.lastCheck).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Gmail connected'}</span></span>
+        ${app.vault.mail.pending?.length ? `<span class="badge-count">${app.vault.mail.pending.length}</span>` : ''}${icon('chev-r', 'chev')}
+      </button>` : ''}
       ${!app.demo && app.account ? `<button class="row with-icon tap" data-act="bank">
         <span class="cat-icon sm" style="--c:var(--${app.vault.bank?.problem ? 'orange' : 'blue'})">${icon('arrows')}</span>
         <span class="main"><span class="title">${app.vault.bank?.accessToken ? esc(app.vault.bank.institution || 'Bank Sync') : 'Connect Your Bank'}</span>
         <span class="subtitle">${app.vault.bank?.accessToken ? (app.vault.bank.problem ? 'Needs you to sign in again' : app.vault.bank.lastSync ? `Synced ${esc(new Date(app.vault.bank.lastSync).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Connected') : 'New transactions come in on their own'}</span></span>
         ${icon('chev-r', 'chev')}
-      </button>` : ''}
-      ${!app.demo && (app.vault.mail?.refresh || app.vault.mail?.pending?.length) ? `<button class="row with-icon tap" data-act="mail">
-        <span class="cat-icon sm" style="--c:var(--${app.vault.mail.problem ? 'orange' : 'indigo'})">${icon('envelope')}</span>
-        <span class="main"><span class="title">Bank Emails</span>
-        <span class="subtitle">${app.vault.mail.problem ? 'Needs you to sign in to Gmail again' : app.vault.mail.pending?.length ? `${plural(app.vault.mail.pending.length, 'transaction')} to check` : app.vault.mail.lastCheck ? `Checked ${esc(new Date(app.vault.mail.lastCheck).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Gmail connected'}</span></span>
-        ${app.vault.mail.pending?.length ? `<span class="badge-count">${app.vault.mail.pending.length}</span>` : ''}${icon('chev-r', 'chev')}
       </button>` : ''}
       <button class="row with-icon tap" data-act="statements">
         <span class="cat-icon sm" style="--c:var(--${bad ? 'orange' : 'green'})">${icon(bad ? 'warn' : 'seal')}</span>
@@ -247,6 +247,16 @@ function banners() {
 }
 
 function emptyState() {
+  if (app.account && !app.demo) {
+    const on = app.vault.mail?.connected;
+    return `<div class="card"><div class="empty">
+    <div class="ic">${icon('envelope')}</div>
+    <h3>${on ? 'Waiting for your first bank email' : 'Connect your email'}</h3>
+    <p>${on ? 'Gmail is connected and checked every hour. Each purchase your bank emails you about shows up here, already categorized.' : 'Most banks email you every time your card is used. Connect Gmail and Money records and categorizes every purchase from those emails, every hour. No statements needed.'}</p>
+    <button class="btn" data-act="mail" style="max-width:280px">${on ? 'Bank Emails' : 'Connect Gmail'}</button>
+    <button class="btn plain" data-act="add" style="max-width:280px;margin-top:6px">Or add statement files</button>
+  </div></div>`;
+  }
   return `<div class="card"><div class="empty">
     <div class="ic">${icon('doc')}</div>
     <h3>Add your first statement</h3>

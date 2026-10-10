@@ -750,10 +750,10 @@ await test('alerts fill only the days after your statements, and skip what’s a
     alert('a3', '2026-10-03', -30, 'Mystery', { confidence: 'check' }),
     { ok: false, key: 'n1', reason: 'promo' },
   ], { today: '2026-10-04' });
-  assert.deepEqual([out.added, out.waiting, out.covered, out.notAlerts], [0, 2, 1, 1], 'a source you haven’t said yes to waits for a check');
-  assert.equal(v.mail.pending.length, 2);
+  assert.deepEqual([out.added, out.waiting, out.covered, out.notAlerts], [1, 1, 1, 1], 'sure alerts are recorded straight away; unsure ones wait');
+  assert.equal(v.mail.pending.length, 1);
   const r = addAlerts(v, v.mail.pending.map((p) => ({ ...p, ok: true })), { today: '2026-10-04' });
-  assert.equal(r.added, 2);
+  assert.equal(r.added, 1);
   assert.equal(v.mail.pending.length, 0);
   const m = buildModel(v, compiled);
   const t = m.txns.find((x) => x.ext === 'mail:a2');
@@ -762,21 +762,27 @@ await test('alerts fill only the days after your statements, and skip what’s a
   assert.ok(v.statements.some((s) => s.id === '2026-10' && s.source === 'sync'), 'October gets a statement of its own');
   // The same email again does nothing; neither does a second alert for the same purchase.
   const again = routeAlerts(v, [alert('a2', '2026-10-02', -12.48, 'Tim Hortons'), alert('a4', '2026-10-03', -12.48, 'Tim Hortons Store')], { today: '2026-10-04' });
-  assert.equal(again.added + again.waiting, 1);
+  assert.equal(again.added + again.waiting, 0);
 });
-await test('followed sources add sure alerts by themselves; ignored ones are dropped', () => {
+await test('banks set to “check first” wait; ignored ones are dropped; card payments and pay are categorized', () => {
   const v = fileVault();
   delete v.bank;
   routeAlerts(v, [], {});
-  v.mail.sources[sourceOf(alert('x', '2026-10-01', -1, 'x'))] = true;
   v.mail.sources['TD · Bank account'] = false;
+  v.mail.sources['RBC · Credit card'] = 'ask';
   const out = routeAlerts(v, [
     alert('b1', '2026-10-02', -4.5, 'Corner Cafe'),
     alert('b2', '2026-10-02', -60, 'Unsure Place', { confidence: 'check' }),
     alert('b3', '2026-10-02', -20, 'USD Shop', { currency: 'USD' }),
     alert('b4', '2026-10-02', -15, 'Td Thing', { bank: 'TD', account: 'bank' }),
+    alert('b5', '2026-10-02', -9, 'Rbc Thing', { bank: 'RBC' }),
+    alert('b6', '2026-10-03', -500, 'CIBC Visa', { kind: 'payment', bank: 'CIBC', account: 'bank' }),
+    alert('b7', '2026-10-03', 2100, 'Acme Payroll', { kind: 'deposit', bank: 'CIBC', account: 'bank' }),
   ], { today: '2026-10-04', currency: 'CAD' });
-  assert.deepEqual([out.added, out.waiting, out.ignored], [1, 2, 1], 'unsure and foreign-currency alerts wait');
+  assert.deepEqual([out.added, out.waiting, out.ignored], [3, 3, 1], 'unsure, foreign-currency and check-first alerts wait');
+  const m = buildModel(v, compiled);
+  assert.equal(m.txns.find((t) => t.ext === 'mail:b6').cat.id, 'own', 'paying the card is a transfer, not spending');
+  assert.equal(m.txns.find((t) => t.ext === 'mail:b7').cat.id, 'income');
   dismissAlerts(v, v.mail.pending.map((p) => p.key));
   assert.equal(routeAlerts(v, [alert('b2', '2026-10-02', -60, 'Unsure Place', { confidence: 'check' })], { today: '2026-10-04' }).waiting, 0, 'a skipped alert isn’t asked about again');
 });

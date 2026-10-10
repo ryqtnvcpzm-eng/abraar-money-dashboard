@@ -18,12 +18,20 @@ export function mailState(vault) {
   vault.mail ||= {};
   const m = vault.mail;
   m.seen ||= [];
-  m.sources ||= {}; // "CIBC · Credit card" -> true (add these) | false (ignore these)
+  m.sources ||= {}; // "CIBC · Credit card" -> false (ignore these) | 'ask' (always check first); otherwise recorded
   m.pending ||= [];
   return m;
 }
 
-const HINTS = { transfer: (p) => (p.amount < 0 ? 'TRANSFER_OUT' : 'TRANSFER_IN'), payment: (p) => (p.amount > 0 && p.account === 'card' ? 'LOAN_PAYMENTS_CREDIT_CARD' : null) };
+// A card payment is money moving between your own accounts (the card's purchases are the spending), and pay
+// is income: the bank feed's categories say so, and Money's categorizer understands them.
+const CARD = /\b(visa|master ?card|amex|american express|credit card|card payment|cardmember)\b/i;
+const HINTS = {
+  transfer: (p) => (p.amount < 0 ? (CARD.test(p.merchant || '') ? 'LOAN_PAYMENTS_CREDIT_CARD' : 'TRANSFER_OUT') : 'TRANSFER_IN'),
+  payment: (p) => ((p.amount > 0 && p.account === 'card') || CARD.test(p.merchant || '') ? 'LOAN_PAYMENTS_CREDIT_CARD' : null),
+  deposit: (p) => (p.amount > 0 && /\b(payroll|salary|pay ?roll|wages?|direct deposit)\b/i.test(p.merchant || '') ? 'INCOME_WAGES' : null),
+  purchase: (p) => (CARD.test(p.merchant || '') ? 'LOAN_PAYMENTS_CREDIT_CARD' : null),
+};
 
 /** One parsed alert → a vault transaction (money out negative). */
 export function fromAlert(p) {
@@ -82,8 +90,8 @@ export function dismissAlerts(vault, keys) {
 }
 
 /**
- * Sort freshly read emails (parseAlert results): ones you've said to add from a source you follow are
- * added straight away when the reading is sure; the rest wait for a quick check. Mutates the vault.
+ * Sort freshly read emails (parseAlert results): ones Money is sure about are recorded straight away (unless
+ * you've asked to check that bank's first, or ignore it); the rest wait for a quick check. Mutates the vault.
  * Returns { added, waiting, ignored, notAlerts, covered, duplicates }.
  */
 export function routeAlerts(vault, parsed, { today = iso(new Date()), currency = null } = {}) {
@@ -100,7 +108,7 @@ export function routeAlerts(vault, parsed, { today = iso(new Date()), currency =
     if (follow === false) { seen.add(p.key); out.ignored++; continue; }
     if (fileEnd && p.date <= fileEnd) { seen.add(p.key); out.covered++; continue; }
     const foreign = p.currency && currency && p.currency !== currency;
-    if (follow === true && p.confidence === 'high' && !foreign) auto.push(p);
+    if (follow !== 'ask' && p.confidence === 'high' && !foreign) auto.push(p);
     else { mail.pending.push(slim(p)); waiting.add(p.key); out.waiting++; }
   }
   mail.pending.sort((a, b) => (a.date < b.date ? 1 : -1));

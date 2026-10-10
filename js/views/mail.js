@@ -1,13 +1,14 @@
-// Bank Emails: most banks email you each time your card is used. Money reads those alerts (from Gmail,
-// a pasted email or .eml files), picks out the amount, the store, the date and which way the money went,
-// and adds them, so the month is up to date before the statement arrives. Unsure ones wait for a check.
+// Bank Emails: most banks email you each time your card is used. With Gmail connected, the sync server
+// checks every hour (even with Money closed) and seals any alert emails to this account's key; Money opens
+// them when it's open, reads the amount, the store, the date and which way the money went, and records and
+// categorizes them. Unsure ones wait for a quick check. Pasted emails and .eml files work too.
 import { app } from '../state.js';
 import { money, esc, plural, dateLabel } from '../format.js';
 import * as cloud from '../cloud.js';
 import { icon, openSheet, haptic, toast, alertSheet } from '../ui.js';
 
-let checking = null;
-let access = null; // { token, exp, refresh } — Gmail access for one saved sign-in, in memory only
+let pulling = null;
+let timer = null;
 
 const when = (iso) => new Date(iso).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
@@ -15,80 +16,76 @@ function mailMessage(e) {
   const code = e?.code;
   if (code === 'offline') return 'You’re offline.';
   if (code === 'mail_not_configured') return 'Gmail isn’t set up on this site yet.';
-  if (code === 'mail_reconnect' || code === 'expired') return 'Gmail needs you to sign in again.';
-  if (code === 'forbidden') return 'Gmail said no. Make sure the Gmail API is switched on in the Google Cloud project.';
-  if (code === 'busy') return 'Gmail is busy. Try again in a minute.';
+  if (code === 'mail_reconnect') return 'Gmail needs you to sign in again.';
+  if (code === 'mail_forbidden') return 'Gmail said no. Make sure the Gmail API is switched on in the Google Cloud project.';
   return 'Couldn’t reach Gmail. Try again in a minute.';
 }
 
-async function accessToken(force = false) {
-  const refresh = app.vault.mail.refresh;
-  // Only ever for the sign-in in the vault that's open now (another account may unlock on this device).
-  if (!force && access && access.refresh === refresh && access.exp > Date.now() + 60e3) return access.token;
-  access = null;
-  const r = await cloud.mail(app.account, app.vault.sync.token, 'token', { refreshToken: refresh });
-  if (app.vault?.mail?.refresh !== refresh) throw Object.assign(new Error('locked'), { code: 'locked' });
-  access = { token: r.accessToken, exp: Date.now() + (r.expiresIn || 3600) * 1000, refresh };
-  return access.token;
-}
-
-/** Read new alert emails from Gmail (quiet = in the background after unlocking). Resolves to counts, or null. */
-export function checkMail({ quiet = false } = {}) {
-  if (checking) return checking;
-  checking = (async () => {
-    const m = app.vault?.mail;
-    if (!m?.refresh || !app.account || !app.vault?.sync?.token || app.demo) return null;
-    const started = new Date().toISOString();
+/**
+ * Collect what the hourly check found (check: ask the server to look in Gmail right now first). Opens the sealed
+ * emails with the vault's key, records the transactions, and lets the server delete its copies.
+ * Resolves to { added, waiting } or null.
+ */
+export function pullMail({ quiet = false, check = false } = {}) {
+  // A quiet pull already running doesn't look in Gmail: a "check now" waits for it, then runs.
+  if (pulling) return check ? pulling.then(() => pullMail({ quiet, check })) : pulling;
+  const run = (async () => {
+    const vault = app.vault;
+    const m = vault?.mail;
+    if (!m?.connected || !m.key || !app.account || !vault.sync?.token || app.demo) return null;
+    const call = (action, body) => cloud.mail(app.account, vault.sync.token, action, body);
     try {
-      const { readAlerts } = await import('../gmail.js');
+      const { openBox, readMessages } = await import('../gmail.js');
       const { routeAlerts } = await import('../mail.js');
-      const vault = app.vault;
-      const read = async () => {
-        const seen = new Set([...(m.seen || []), ...(m.pending || []).map((p) => p.key)]);
-        try { return await readAlerts(await accessToken(), { since: m.lastCheck, seen }); } catch (e) {
-          if (e.code !== 'expired') throw e;
-          return readAlerts(await accessToken(true), { since: m.lastCheck, seen });
-        }
-      };
-      const out = { added: 0, waiting: 0 };
-      let scanned = 0, more = false;
-      // A big backlog (the first time, or after weeks away) comes in batches; the search window only moves
-      // on once everything in it has been read.
-      for (let round = 0; round < 4; round++) {
-        const res = await read();
+      let st = null;
+      if (check) for (let i = 0; i < 6; i++) { st = await call('check'); if (!st.more || st.problem) break; }
+      const out = { added: 0, waiting: 0, read: 0 };
+      for (let round = 0; round < 40; round++) {
+        st = await call('inbox');
         if (app.vault !== vault) return null; // locked meanwhile
-        const r = routeAlerts(vault, res.parsed, { currency: vault.account?.currency || null });
-        out.added += r.added; out.waiting += r.waiting; scanned += res.scanned;
-        more = res.more;
-        if (!more) break;
+        if (!st.items.length) break;
+        for (const it of st.items) {
+          let msgs = [];
+          try { msgs = await openBox(m.key, it.box); } catch { /* sealed to an older key: nothing to read */ }
+          const r = routeAlerts(vault, readMessages(msgs), { currency: vault.account?.currency || null });
+          out.added += r.added; out.waiting += r.waiting; out.read += msgs.length;
+        }
+        // Saved (encrypted) before the server lets go of its copies.
+        await app.commit({ silent: true });
+        await call('ack', { ids: st.items.map((x) => x.id) });
+        if (st.items.length < 5) break;
       }
-      if (!more) m.lastCheck = started;
-      m.problem = null;
-      m.last = { at: started, scanned, added: out.added, waiting: out.waiting };
-      await app.commit({ silent: true });
+      const problem = st?.problem || null;
+      const changed = m.problem !== problem || m.lastCheck !== st?.lastCheck;
+      m.problem = problem;
+      m.lastCheck = st?.lastCheck || m.lastCheck || null;
+      if (out.read || check) m.last = { at: new Date().toISOString(), scanned: out.read, added: out.added, waiting: out.waiting };
+      if (changed || check) await app.commit({ silent: true });
       if (!quiet || out.added || out.waiting) {
         const bits = [out.added ? `${plural(out.added, 'transaction')} added` : '', out.waiting ? `${out.waiting} to check` : ''].filter(Boolean);
         toast(bits.length ? `Bank emails: ${bits.join(', ')}` : 'No new bank emails', { icon: 'envelope', color: 'blue' });
       }
       return out;
     } catch (e) {
-      if (e.code === 'locked' || app.vault?.mail !== m) return null;
-      if (e.code === 'mail_reconnect') { m.problem = 'login'; access = null; await app.commit({ silent: true }); }
+      if (app.vault !== vault) return null;
+      if (e.code === 'mail_not_connected') { m.connected = false; m.problem = 'login'; await app.commit({ silent: true }); }
       if (!quiet) toast(mailMessage(e), { icon: 'warn', color: 'orange' });
       return null;
-    } finally {
-      setTimeout(() => { checking = null; }, 0);
     }
   })();
-  return checking;
+  pulling = run;
+  // Cleared before anything chained on it runs, so a waiting "check now" starts a fresh pull.
+  run.finally(() => { if (pulling === run) pulling = null; });
+  return run;
 }
 
-/** In the background: when Gmail is connected and the last check is more than three hours old. */
-export function maybeAutoCheck() {
+/** After unlocking: collect now, then every hour while Money stays open. */
+export function maybeAutoCheck({ now = true } = {}) {
   const m = app.vault?.mail;
-  if (!m?.refresh || m.problem) return;
-  if (m.lastCheck && Date.now() - Date.parse(m.lastCheck) < 3 * 3600e3) return;
-  checkMail({ quiet: true });
+  if (!m?.connected) return;
+  if (now) pullMail({ quiet: true });
+  clearInterval(timer);
+  timer = setInterval(() => { if (app.vault?.mail?.connected) pullMail({ quiet: true }); else clearInterval(timer); }, 3600e3);
 }
 
 const STEPS_ALERTS = 'In your bank’s app or website, look for <b>Alerts</b> or <b>Notifications</b> and turn on email alerts for purchases (set the amount to $0 or $1 to get every one), plus e-Transfers and deposits if you like.';
@@ -104,7 +101,10 @@ export async function openMail({ onDone } = {}) {
   const { mailState, addAlerts, dismissAlerts, routeAlerts } = await import('../mail.js');
   const { parseAlert, parseEml, sourceOf, KIND_NAMES } = await import('../email-parse.js');
   if (closed || !app.vault) return;
-  if (!app.demo) mailState(app.vault);
+  if (!app.demo) {
+    const m = mailState(app.vault);
+    if (m.refresh) { delete m.refresh; m.connected = false; } // the earlier version kept the sign-in here
+  }
 
   const hero = (ic, color, title, text) => `<div class="sheet-hero" style="padding-top:18px">
     <span class="cat-icon lg" style="--c:var(--${color})">${icon(ic)}</span><div class="name">${title}</div>
@@ -120,7 +120,7 @@ export async function openMail({ onDone } = {}) {
     for (const p of m.pending) { const k = sourceOf(p); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
     const n = m.pending.filter((p) => picked.has(p.key)).length;
     return `<div class="section-head" style="margin-top:22px"><h2>To Check</h2><span class="detail" style="color:var(--label-2)">${m.pending.length}</span></div>
-      <p class="list-foot" style="margin-top:-4px">Tick the ones to add. A statement you add later replaces these days.</p>
+      <p class="list-foot" style="margin-top:-4px">Money wasn’t sure about these (or they’re in another currency). Tick the ones to record.</p>
       ${[...groups].map(([src, list]) => `
         <div class="list-head"><span>${esc(src)}</span></div>
         <div class="list">
@@ -132,8 +132,8 @@ export async function openMail({ onDone } = {}) {
               <span class="subtitle">${esc(dateLabel(p.date, 'short'))} · ${esc(KIND_NAMES[p.kind] || '')}${foreign ? ` · in ${esc(p.currency)}` : ''}</span></span>
               <span class="value num ${p.amount > 0 ? 'pos' : ''}">${money(p.amount, { sign: p.amount > 0 })}</span></button>`;
           }).join('')}
-          <label class="row"><span class="main"><span class="title">Add new ones by themselves</span><span class="subtitle" style="white-space:normal">When Money is sure what an email says</span></span>
-            <span class="switch"><input type="checkbox" data-follow="${esc(src)}" ${m.sources[src] === true ? 'checked' : ''} aria-label="Add new ones from ${esc(src)} by themselves"><span></span></span></label>
+          <label class="row"><span class="main"><span class="title">Record new ones by themselves</span><span class="subtitle" style="white-space:normal">When Money is sure what an email says. Off: every one waits here.</span></span>
+            <span class="switch"><input type="checkbox" data-follow="${esc(src)}" ${m.sources[src] !== 'ask' ? 'checked' : ''} aria-label="Record new ones from ${esc(src)} by themselves"><span></span></span></label>
           <button class="row tap" data-ignore="${esc(src)}"><span class="main"><span class="title" style="color:var(--red)">Ignore Emails Like These</span></span></button>
         </div>`).join('')}
       <div class="btn-row"><button class="btn" data-act="add" ${n ? '' : 'disabled'}>${icon('plus')} Add ${n ? plural(n, 'Transaction') : 'Transactions'}</button>
@@ -155,31 +155,32 @@ export async function openMail({ onDone } = {}) {
           'In Cloudflare → your Worker → Settings → Variables and secrets, add <b>GOOGLE_CLIENT_ID</b>, and <b>GOOGLE_CLIENT_SECRET</b> as a secret.',
         ], 'gray') : ''}`;
     }
-    if (m.refresh) {
+    if (m.connected && m.problem !== 'login') {
       return `<div class="list-head"><span>Gmail</span></div>
-        ${m.problem === 'login' ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('warn')}</span><span class="txt"><b>Sign in to Gmail again</b><span>Google ended the connection. Reconnect to keep reading alerts.</span></span><button class="btn small" data-act="reconnect">Reconnect</button></div>` : ''}
+        ${m.problem === 'forbidden' ? `<p class="list-foot neg" style="margin-top:0">Gmail said no. Make sure the Gmail API is switched on in the Google Cloud project.</p>` : ''}
         <div class="list">
-          <div class="row with-icon"><span class="cat-icon sm" style="--c:var(--${m.problem ? 'orange' : 'green'})">${icon('envelope')}</span><span class="main"><span class="title">Gmail connected</span><span class="subtitle">Read-only · checks when you open Money</span></span></div>
+          <div class="row with-icon"><span class="cat-icon sm" style="--c:var(--${m.problem ? 'orange' : 'green'})">${icon('envelope')}</span><span class="main"><span class="title">Gmail connected</span><span class="subtitle">Read-only · checked every hour, even with Money closed</span></span></div>
           <div class="row"><span class="main"><span class="title">Last checked</span>${m.last ? `<span class="subtitle">${m.last.scanned ? `${plural(m.last.scanned, 'new email')} read · ${m.last.added} added${m.last.waiting ? ` · ${m.last.waiting} to check` : ''}` : 'No new emails'}</span>` : ''}</span><span class="detail">${m.lastCheck ? esc(when(m.lastCheck)) : 'Never'}</span></div>
         </div>
         <div class="btn-row"><button class="btn" data-act="check" ${busy ? 'disabled' : ''}>${busy ? '<span class="spinner"></span> Reading…' : `${icon('arrows')} Check Now`}</button>
           <button class="btn secondary destructive" data-act="disconnect">Disconnect Gmail</button></div>`;
     }
     return `<div class="list-head"><span>Gmail</span></div>
+      ${m.problem === 'login' ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('warn')}</span><span class="txt"><b>Sign in to Gmail again</b><span>Google ended the connection. Connect again to keep recording transactions.</span></span></div>` : ''}
       ${poll ? `<div class="list"><div class="row"><span class="spinner dark"></span><span class="main"><span class="title">Waiting for Google…</span><span class="subtitle" style="white-space:normal">Allow read-only access on Google’s page, then come back. This updates by itself.</span></span></div></div>` : ''}
       ${link ? `<a class="btn" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer" data-act="go">${icon('envelope')} ${poll ? 'Open Google Again' : 'Connect Gmail'}</a>`
         : `<button class="btn" disabled><span class="spinner"></span> Preparing…</button>`}
-      <p class="list-foot">Google asks to let Money <b>read</b> your email. Money only looks at emails that read like bank alerts, reads them on this device, and keeps just the date, amount and store. It can’t send, change or delete anything.</p>`;
+      <p class="list-foot">Google asks to let Money <b>read</b> your email. Every hour, Money looks only for emails that read like bank alerts and records the transactions in them. It can’t send, change or delete anything.</p>`;
   }
 
   const draw = () => {
     const m = app.vault.mail || {};
     if (app.demo) return sheet.setBody(hero('lock', 'gray', 'Not in sample data', 'Bank emails add real transactions, so it’s off while you’re exploring sample data.'));
-    const fresh = !m.refresh && !(m.pending || []).length && !(m.seen || []).length;
+    const fresh = !m.connected && !(m.pending || []).length && !(m.seen || []).length;
     sheet.setBody(`
       ${hero('envelope', 'blue', 'Transactions from bank emails', fresh
-        ? 'Most banks can email you every time your card is used. Money reads those alerts, picks out the amount, the store, the date and which way the money went, and adds them, so this month is up to date before your statement arrives.'
-        : 'New alerts are read for the amount, store, date and direction. Ones Money isn’t sure about wait here for a quick check.')}
+        ? 'Most banks email you every time your card is used. Connect Gmail and Money checks every hour for those alerts, then records and categorizes each purchase, deposit and transfer. No statements to download.'
+        : 'Every hour, new alerts are read for the amount, store, date and direction, then recorded and categorized. The few Money isn’t sure about wait here for a quick check.')}
       ${error ? `<p class="list-foot neg" style="text-align:center">${esc(error)}</p>` : ''}
       ${review()}
       ${gmailBlock()}
@@ -197,13 +198,15 @@ export async function openMail({ onDone } = {}) {
       </div>
       <div class="list-head"><span>Getting alerts</span></div>
       <p class="list-foot" style="margin-top:0">${STEPS_ALERTS} Alerts that go to a different address can be forwarded to the Gmail you connect, or pasted here.</p>
-      <p class="list-foot">Emails are read on this device. Only the date, amount, a cleaned-up store name and which bank sent it are kept, inside your encrypted vault. Card and account numbers are never kept. One-time codes, ads, statements-ready notes, reminders and declined purchases are skipped.</p>`);
+      <p class="list-foot">The hourly check runs on your Money server: it keeps the Gmail sign-in encrypted, and locks any alert emails it finds so only your own devices can open them. They’re deleted from the server as soon as Money has read them. Only the date, amount, a cleaned-up store name and which bank sent it are kept, inside your encrypted vault; card and account numbers never are. One-time codes, ads, statements-ready notes, reminders and declined purchases are skipped.</p>`);
   };
 
   async function prepare() {
-    if (!status.mail || !app.account || app.vault.mail?.refresh && app.vault.mail.problem !== 'login') return;
+    if (!status.mail || !app.account || app.vault.mail?.connected && app.vault.mail.problem !== 'login') return;
     try {
-      const { pkce } = await import('../gmail.js');
+      const { pkce, newMailKey } = await import('../gmail.js');
+      // The key that lets only this account's devices open what the hourly check finds (kept if reconnecting).
+      if (!app.vault.mail.key) { app.vault.mail.key = await newMailKey(); await app.commit({ silent: true }); }
       const p = await pkce();
       verifier = p.verifier;
       link = await cloud.mail(app.account, app.vault.sync.token, 'link', { challenge: p.challenge });
@@ -215,7 +218,8 @@ export async function openMail({ onDone } = {}) {
     if (finishing || !link) return;
     finishing = true;
     try {
-      const r = await cloud.mail(app.account, app.vault.sync.token, 'finish', { state: link.state, verifier });
+      const { publicOf } = await import('../gmail.js');
+      const r = await cloud.mail(app.account, app.vault.sync.token, 'finish', { state: link.state, verifier, publicKey: publicOf(app.vault.mail.key) });
       if (r.status === 'pending') return;
       stop();
       if (r.status !== 'done') {
@@ -225,17 +229,17 @@ export async function openMail({ onDone } = {}) {
         link = null; draw(); prepare(); return;
       }
       const m = mailState(app.vault);
-      Object.assign(m, { refresh: r.refreshToken, connectedAt: new Date().toISOString(), problem: null });
-      access = { token: r.accessToken, exp: Date.now() + (r.expiresIn || 3600) * 1000 };
+      Object.assign(m, { connected: true, connectedAt: new Date().toISOString(), problem: null });
       link = null;
       await app.commit({ silent: true });
       haptic('success');
       await runCheck();
+      maybeAutoCheck({ now: false });
     } catch (e) { error = mailMessage(e); draw(); } finally { finishing = false; }
   }
   async function runCheck() {
     busy = true; error = null; draw();
-    await checkMail();
+    await pullMail({ check: true });
     busy = false; picked = null; draw();
   }
   async function take(parsed) {
@@ -321,15 +325,13 @@ export async function openMail({ onDone } = {}) {
       pasteNote = { ok: true, text: out.added ? `Added: ${p.merchant || KIND_NAMES[p.kind]} ${money(p.amount)} on ${dateLabel(p.date, 'short')}.` : out.waiting ? `Found ${p.merchant || KIND_NAMES[p.kind]} ${money(p.amount)} on ${dateLabel(p.date, 'short')}. It’s in the list above to check.` : out.covered ? 'Your statements already cover that day.' : 'Already read that one.' };
       draw();
     }
-    if (act === 'reconnect') { haptic(); link = null; access = null; draw(); prepare(); }
     if (act === 'disconnect') {
       const ok = await alertSheet({ title: 'Disconnect Gmail?', message: 'Transactions already added stay. Money stops reading new alerts and Google forgets the connection.', actions: [{ label: 'Disconnect', value: true, style: 'destructive' }, { label: 'Cancel', value: false, style: 'cancel' }] });
       if (!ok) return;
       haptic('heavy');
       const m = app.vault.mail;
-      try { await cloud.mail(app.account, app.vault.sync.token, 'remove', { refreshToken: m.refresh }); } catch { /* forgotten here either way */ }
-      for (const k of ['refresh', 'connectedAt', 'lastCheck', 'problem', 'last']) delete m[k];
-      access = null;
+      try { await cloud.mail(app.account, app.vault.sync.token, 'remove'); } catch { /* forgotten here either way */ }
+      for (const k of ['connected', 'connectedAt', 'lastCheck', 'problem', 'last']) delete m[k];
       await app.commit({ silent: true });
       toast('Gmail disconnected');
       draw();
@@ -341,8 +343,7 @@ export async function openMail({ onDone } = {}) {
     const follow = e.target.dataset?.follow;
     if (follow) {
       haptic();
-      app.vault.mail.sources[follow] = e.target.checked ? true : undefined;
-      if (!e.target.checked) delete app.vault.mail.sources[follow];
+      if (e.target.checked) delete app.vault.mail.sources[follow]; else app.vault.mail.sources[follow] = 'ask';
       await app.commit({ silent: true });
       return;
     }

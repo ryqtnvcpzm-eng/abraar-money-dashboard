@@ -226,7 +226,11 @@ const BAD_MERCHANT = /^(?:a\/c|acc(?:oun)?t|your|you|the|this|that|our|a|an|it|u
 // The parser
 // ---------------------------------------------------------------------------
 
+const MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+/** The day the email was sent, as the sender's own clock saw it ("Fri, 09 Oct 2026 21:10 -0400" is Oct 9, wherever this runs). */
 function mailDay(date, today) {
+  const m = /\b(\d{1,2})\s+([A-Za-z]{3})[a-z]*\.?\s+(\d{4})\b/.exec(String(date || ''));
+  if (m && MON[m[2].toLowerCase()] && validDate(+m[3], MON[m[2].toLowerCase()], +m[1])) return isoDate(+m[3], MON[m[2].toLowerCase()], +m[1]);
   const d = date ? new Date(date) : null;
   return d && !Number.isNaN(d.getTime()) ? iso(d) : today;
 }
