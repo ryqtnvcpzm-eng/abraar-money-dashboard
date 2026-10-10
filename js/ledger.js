@@ -88,7 +88,9 @@ export function commitImport(vault, prep) {
   // Re-importing replaces only the dates the new file covers (a partial CSV mustn't erase the rest of
   // the month), and keeps manual edits (category, one-off) on the same transactions.
   const covered = inside(prep.period);
-  const replaced = (t) => t.statement === prep.id && covered(t);
+  // Synced and email-alert rows in those dates go too, whichever month they were filed under (a card
+  // statement often runs mid-month to mid-month): the file is the record.
+  const replaced = (t) => covered(t) && (t.statement === prep.id || (!!t.ext && !!prep.period));
   const old = new Map();
   for (const t of vault.transactions) if (replaced(t) && (t.locked || t.oneOff || t.parts || t.items)) old.set(dupKey(t), t);
   for (const t of prep.transactions) {

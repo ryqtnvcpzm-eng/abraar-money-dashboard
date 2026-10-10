@@ -315,14 +315,20 @@ const pkcePair = async () => {
   return { verifier, challenge: b64u(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))) };
 };
 // Google's page: the person says yes, and Google sends the browser to the callback with a code.
-async function consent(authUrl, { scope, deny = false } = {}) {
+// The app asks for the link (the browser keeps the cookie that comes with it).
+async function mailLink(user, token, challenge) {
+  const r = await worker.fetch(new Request(`https://money.test/api/v1/accounts/${user}/mail/link`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge }) }), liveEnv);
+  const cookie = (r.headers.get('Set-Cookie') || '').split(';')[0];
+  return { ...(await r.json()), cookie, setCookie: r.headers.get('Set-Cookie') };
+}
+async function consent(authUrl, { scope, deny = false, cookie = '' } = {}) {
   const u = new URL(authUrl);
   const code = `4/test-code-${crypto.randomUUID()}`;
   google.codes.set(code, { challenge: u.searchParams.get('code_challenge'), redirect: u.searchParams.get('redirect_uri'), scope });
   const back = new URL(u.searchParams.get('redirect_uri'));
   back.searchParams.set('state', u.searchParams.get('state'));
   if (deny) back.searchParams.set('error', 'access_denied'); else back.searchParams.set('code', code);
-  return worker.fetch(new Request(back), liveEnv);
+  return worker.fetch(new Request(back, { headers: cookie ? { Cookie: cookie } : {} }), liveEnv);
 }
 let G, gRefresh;
 await test('off until the Google keys are set', async () => {
@@ -338,7 +344,8 @@ await test('every mail call needs the account’s token', async () => {
 });
 await test('connect: Google’s page, read-only Gmail, PKCE, and the token only reaches the browser', async () => {
   const p = await pkcePair();
-  const link = await cloud.mail('mailer', G.token, 'link', { challenge: p.challenge });
+  const link = await mailLink('mailer', G.token, p.challenge);
+  assert.match(link.setCookie, /^__Host-money-mail=[0-9a-f]{64}; Path=\/; Secure; HttpOnly; SameSite=Lax/);
   const u = new URL(link.url);
   assert.equal(u.origin + u.pathname, 'https://google.test/auth');
   assert.equal(u.searchParams.get('scope'), 'https://www.googleapis.com/auth/gmail.readonly');
@@ -347,7 +354,7 @@ await test('connect: Google’s page, read-only Gmail, PKCE, and the token only 
   assert.equal(u.searchParams.get('access_type'), 'offline');
   assert.ok(!link.url.includes('g-secret'));
   assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'pending');
-  const back = await consent(link.url);
+  const back = await consent(link.url, { cookie: link.cookie });
   assert.equal(back.status, 302);
   assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html');
   // The waiting code is stored under a hash of the state, never the state itself.
@@ -366,23 +373,37 @@ await test('connect: Google’s page, read-only Gmail, PKCE, and the token only 
 });
 await test('a wrong PKCE verifier can’t turn the code into a token', async () => {
   const p = await pkcePair();
-  const link = await cloud.mail('mailer', G.token, 'link', { challenge: p.challenge });
-  await consent(link.url);
+  const link = await mailLink('mailer', G.token, p.challenge);
+  await consent(link.url, { cookie: link.cookie });
   const other = await pkcePair();
   await rejects(cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: other.verifier }), 'mail_reconnect');
 });
 await test('saying no, or unticking Gmail, is reported (and the grant is revoked)', async () => {
   let p = await pkcePair();
-  let link = await cloud.mail('mailer', G.token, 'link', { challenge: p.challenge });
-  const back = await consent(link.url, { deny: true });
+  let link = await mailLink('mailer', G.token, p.challenge);
+  const back = await consent(link.url, { deny: true, cookie: link.cookie });
   assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
   assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'exited');
   p = await pkcePair();
-  link = await cloud.mail('mailer', G.token, 'link', { challenge: p.challenge });
-  await consent(link.url, { scope: 'openid' });
+  link = await mailLink('mailer', G.token, p.challenge);
+  await consent(link.url, { scope: 'openid', cookie: link.cookie });
   const before = google.revoked.length;
   assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'no_scope');
   assert.equal(google.revoked.length, before + 1);
+});
+await test('someone else’s sign-in link can’t collect your Gmail (the code only counts in the browser that asked)', async () => {
+  // An account holder makes a link and sends it to someone; that person says yes in their own browser.
+  const p = await pkcePair();
+  const link = await mailLink('mailer', G.token, p.challenge);
+  const back = await consent(link.url); // no cookie: a different browser
+  assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'other_browser');
+  // A cookie from another link doesn't count either.
+  const p2 = await pkcePair();
+  const l2 = await mailLink('mailer', G.token, p2.challenge);
+  const l3 = await mailLink('snooper', (await cloud.signIn('snooper', 'red teapot windy harbour')).token, p2.challenge);
+  await consent(l2.url, { cookie: l3.cookie });
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: l2.state, verifier: p2.verifier })).status, 'other_browser');
 });
 await test('a made-up state at the callback goes nowhere', async () => {
   const r = await worker.fetch(new Request(`https://money.test/api/v1/mail/callback?state=${'ab'.repeat(32)}&code=4/x`), liveEnv);

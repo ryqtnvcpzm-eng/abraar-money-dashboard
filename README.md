@@ -113,7 +113,7 @@ To switch on Gmail (once, for the whole site):
 3. **Data Access → Add or remove scopes**: add `https://www.googleapis.com/auth/gmail.readonly`.
 4. **Clients → Create client → Web application**. Under **Authorized redirect URIs** add `https://<your site>/api/v1/mail/callback`. Copy the **Client ID** and **Client secret**.
 5. In Cloudflare, open your Worker → **Settings → Variables and Secrets** and add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (type **Secret**).
-6. Check `https://<your site>/api/v1/status` says `"mail":true`, then in Money tap **+ → Bank Emails → Connect Gmail**.
+6. Check `https://<your site>/api/v1/status` says `"mail":true`, then in Money tap **+ → Bank Emails → Connect Gmail**. Google's page has to come back to the same browser Money is open in; if Money says it came back to a different browser (it can happen from the iPhone Home Screen app), connect once from Money in Safari. The connection is saved in your vault, so it then works on all your devices.
 
 Then turn on email alerts in your bank's app (look for **Alerts** or **Notifications**; set purchase alerts to $0 or $1 to get every one). If alerts go to another address, forward them to the connected Gmail, or paste them.
 

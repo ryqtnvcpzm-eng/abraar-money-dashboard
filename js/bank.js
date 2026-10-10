@@ -104,9 +104,13 @@ export function syncStatements(vault, { today = iso(new Date()) } = {}) {
   const now = bank.balance == null ? null : toCents(credit ? -bank.balance : bank.balance);
   const asOf = bank.balanceDate && bank.balanceDate >= synced[synced.length - 1].date ? bank.balanceDate : today;
   const fileEnd = lastFileDay(vault);
-  // Balance at the end of a day = balance now − everything synced after that day.
+  // Balance at the end of a day = balance now − everything synced after that day. Without a bank balance
+  // (bank emails only), carry the last statement file's closing balance forward instead.
   const after = (day) => synced.reduce((s, t) => (t.date > day ? s + toCents(t.amount) : s), 0);
-  const balAt = (day) => (now == null ? null : fromCents(now - after(day)));
+  const lastFile = fileEnd ? vault.statements.filter((s) => s.source !== 'sync' && (s.fileEnd || s.end) === fileEnd).pop() : null;
+  const anchor = lastFile?.fileClosing != null ? toCents(lastFile.fileClosing) : lastFile?.closing != null ? toCents(lastFile.closing) : null;
+  const forward = (day) => synced.reduce((s, t) => (t.date > fileEnd && t.date <= day ? s + toCents(t.amount) : s), anchor);
+  const balAt = (day) => (now != null ? fromCents(now - after(day)) : anchor != null && day >= fileEnd ? fromCents(forward(day)) : null);
 
   const first = monthOf(synced[0].date);
   const last = monthOf(asOf);
@@ -121,6 +125,7 @@ export function syncStatements(vault, { today = iso(new Date()) } = {}) {
       // The file covers the start of this month; the feed carries on from where it stopped.
       if (!(file.fileEnd || file.end) || (file.fileEnd || file.end) >= end) continue;
       file.fileEnd ||= file.end;
+      if (file.fileClosing === undefined) file.fileClosing = file.closing;
       Object.assign(file, { end, closing: balAt(end) ?? file.closing, count: inMonth.length, withdrawals: fromCents(wd), deposits: fromCents(dep), synced: true });
       continue;
     }
@@ -141,21 +146,38 @@ export const followable = (accounts) => (accounts || []).filter((a) => a.type ==
 
 // Transactions from bank alert emails (see mail.js) are stand-ins until the feed or a statement has them.
 export const isMail = (t) => typeof t?.ext === 'string' && t.ext.startsWith('mail:');
-const words = (s) => new Set(String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 3));
-/** The same payment seen twice (an alert and a statement line, or two alerts for one purchase)? */
+// Words that say what kind of payment it was, not where: they don't make two payments the same.
+const PLAIN = new Set('purchase purchases payment payments visa debit credit card mastercard amex pos the and inc ltd store retail email alert from sent transfer interac refund deposit withdrawal'.split(' '));
+const words = (s) => new Set(String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 3 && !PLAIN.has(w) && !/^\d+$/.test(w)));
+const shareWord = (a, b) => { for (const w of a) if (b.has(w)) return true; return false; };
+/**
+ * The same payment seen twice (an alert and a statement line, or two alerts for one purchase)?
+ * Same amount within three days and a word of the name in common; an alert with no name to go on
+ * ("Withdrawal") only matches within a day.
+ */
 export function sameTxn(a, b) {
   if (toCents(a.amount) !== toCents(b.amount)) return false;
   const gap = Math.abs(daysBetween(a.date, b.date));
   if (gap > 3) return false;
-  if (gap <= 1) return true;
   const wa = words(a.merchant || a.name), wb = words(b.merchant || b.name);
-  for (const w of wa) if (wb.has(w)) return true;
-  return false;
+  if (!wa.size || !wb.size) return gap <= 1;
+  return shareWord(wa, wb);
 }
 
-/** When the bank feed brings a payment an alert already added, the feed's copy wins (keeping your edits). */
+/**
+ * When the bank feed brings a payment an alert already added, the feed's copy wins (keeping your edits).
+ * Also when the amount moved a little (a tip, a pre-authorisation settling) at the same place.
+ */
 export function absorbAlert(vault, feedTxn) {
-  const i = vault.transactions.findIndex((t) => isMail(t) && sameTxn(t, feedTxn));
+  let i = vault.transactions.findIndex((t) => isMail(t) && sameTxn(t, feedTxn));
+  if (i < 0) {
+    const wf = words(feedTxn.merchant || feedTxn.name);
+    const close = (t) => {
+      const a = toCents(t.amount), f = toCents(feedTxn.amount);
+      return Math.sign(a) === Math.sign(f) && Math.abs(a - f) <= Math.abs(f) * 0.3 && Math.abs(daysBetween(t.date, feedTxn.date)) <= 5 && shareWord(words(t.merchant || t.name), wf);
+    };
+    i = vault.transactions.findIndex((t) => isMail(t) && close(t));
+  }
   if (i < 0) return null;
   const [old] = vault.transactions.splice(i, 1);
   for (const k of ['locked', 'category', 'name', 'memo', 'oneOff', 'parts']) if (old[k] != null && (k !== 'category' || old.locked)) feedTxn[k] = old[k];

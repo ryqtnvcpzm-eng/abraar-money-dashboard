@@ -12,7 +12,7 @@ export { sameTxn, isMail, absorbAlert };
 import { KIND_NAMES, sourceOf } from './email-parse.js';
 
 const SEEN_MAX = 5000;
-const PENDING_MAX = 300;
+const PENDING_MAX = 1000;
 
 export function mailState(vault) {
   vault.mail ||= {};
@@ -103,9 +103,11 @@ export function routeAlerts(vault, parsed, { today = iso(new Date()), currency =
     if (follow === true && p.confidence === 'high' && !foreign) auto.push(p);
     else { mail.pending.push(slim(p)); waiting.add(p.key); out.waiting++; }
   }
-  mail.seen = [...seen].slice(-SEEN_MAX);
   mail.pending.sort((a, b) => (a.date < b.date ? 1 : -1));
+  // A very long list keeps the newest; the oldest are let go (and not asked about again).
+  for (const p of mail.pending.slice(PENDING_MAX)) seen.add(p.key);
   mail.pending = mail.pending.slice(0, PENDING_MAX);
+  mail.seen = [...seen].slice(-SEEN_MAX);
   const r = addAlerts(vault, auto, { today });
   out.added = r.added;
   out.duplicates = r.duplicates;

@@ -795,5 +795,57 @@ await test('the bank feed and statements replace alert transactions (keeping you
   assert.equal(v.transactions.filter((t) => isMail(t)).length, 0);
 });
 
+
+await test('alerts: comma decimals, card digits, transfers out, dates never in the future', () => {
+  const D = 'Sat, 10 Oct 2026 10:00:00 +0200';
+  const r = (from, text, date = D) => parseAlert({ from, subject: 'Alert', date, text }, { today: '2026-10-10' });
+  assert.equal(r('N26 <a@n26.com>', 'You spent €12,50 at Lidl on 09.10.2026 with your card.').amount, -12.5);
+  assert.equal(r('ING <a@ing.com>', 'A purchase of EUR 1.234,56 was made at MEDIA MARKT.').amount, -1234.56);
+  assert.equal(r('ING <a@ing.com>', 'A purchase of 1 234,56 € was made at FNAC.').amount, -1234.56);
+  assert.equal(r('TD <a@td.com>', 'A purchase of $1,234 was made at BIG STORE.').amount, -1234);
+  for (const text of ['A purchase of $12.00 was made at TIM HORTONS with Visa x1234 on Oct 2.', 'A purchase of $9.00 was made at SHOP 4512-34XX-XXXX-1234 on Oct 2.',
+    'A purchase of $9.00 was made at SHOP 4512 3456 7890 1234 on Oct 2.', 'Sent to: Jane Doe (1234)\nAmount: $20.00\nYou sent money.']) {
+    const a = r('TD <a@td.com>', text);
+    assert.ok(a.ok && !/\d{2}/.test(a.merchant), `${text} -> ${a.merchant}`);
+  }
+  const sent = r('Interac <notify@payments.interac.ca>', 'Your money transfer to SAM for $60.00 was deposited.');
+  assert.equal(sent.amount, -60, 'a transfer you sent is money out, even once it’s deposited');
+  assert.equal(r('TD <a@td.com>', 'A purchase of $9.00 was made at SHOP.', 'Fri, 20 Nov 2026 10:00:00 -0400').date, '2026-10-10');
+  assert.equal(r('TD <a@td.com>', 'A purchase of $9.00 was made at SHOP on Oct 11.').date, '2026-10-10');
+  const t0 = Date.now();
+  r('TD <a@td.com>', '$1.00 '.repeat(10000));
+  r('TD <a@td.com>', '-'.repeat(50000));
+  assert.ok(Date.now() - t0 < 1000, 'long emails stay quick');
+});
+await test('alerts: the same amount at different places isn’t a duplicate', () => {
+  const v = fileVault();
+  delete v.bank;
+  const r = addAlerts(v, [alert('d1', '2026-10-06', -5.25, 'Starbucks'), alert('d2', '2026-10-07', -5.25, 'Tim Hortons'), alert('d3', '2026-10-07', -5.25, 'Tim Hortons Store')], { today: '2026-10-08' });
+  assert.deepEqual([r.added, r.duplicates], [2, 1]);
+});
+await test('alerts alone carry the balance forward from the last statement', () => {
+  const v = fileVault();
+  delete v.bank;
+  addAlerts(v, [alert('e1', '2026-10-08', -200, 'Rent Co'), alert('e2', '2026-10-10', -50, 'Grocer')], { today: '2026-10-10' });
+  const oct = v.statements.find((s) => s.id === '2026-10');
+  assert.deepEqual([oct.opening, oct.closing], [1000, 750]);
+  assert.equal(dailyBalance(buildModel(v, compiled)).at(-1).bal, 75000);
+});
+await test('a card statement that spans two months replaces alerts in both', () => {
+  const v = fileVault();
+  delete v.bank;
+  addAlerts(v, [alert('f1', '2026-10-02', -20, 'Book Nook'), alert('f2', '2026-11-03', -8, 'Corner Shop')], { today: '2026-11-05' });
+  const prep = prepareImport(v, { period: { start: '2026-10-01', end: '2026-11-04' }, opening: 1000, closing: 972, transactions: [{ date: '2026-10-02', description: 'BOOK NOOK', amount: -20 }, { date: '2026-11-03', description: 'CORNER SHOP', amount: -8 }] }, compiled);
+  commitImport(v, prep);
+  assert.equal(v.transactions.filter((t) => isMail(t)).length, 0);
+});
+await test('the bank feed replaces an alert whose amount changed a little (a tip)', () => {
+  const v = fileVault();
+  addAlerts(v, [alert('g1', '2026-10-02', -40, 'Pasta Place')], { today: '2026-10-06' });
+  applyBankSync(v, { added: [feed('o9', '2026-10-04', 48, 'PASTA PLACE TORONTO')], modified: [], removed: [], cursor: 'c2', accounts: [] }, { today: '2026-10-06' });
+  assert.equal(v.transactions.filter((t) => isMail(t)).length, 0);
+  assert.equal(v.transactions.find((t) => t.ext === 'o9').amount, -48);
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 process.exit(failures.length ? 1 : 0);

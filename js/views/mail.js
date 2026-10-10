@@ -7,7 +7,7 @@ import * as cloud from '../cloud.js';
 import { icon, openSheet, haptic, toast, alertSheet } from '../ui.js';
 
 let checking = null;
-let access = null; // { token, exp } — Gmail access, in memory only
+let access = null; // { token, exp, refresh } — Gmail access for one saved sign-in, in memory only
 
 const when = (iso) => new Date(iso).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
@@ -22,9 +22,13 @@ function mailMessage(e) {
 }
 
 async function accessToken(force = false) {
-  if (!force && access && access.exp > Date.now() + 60e3) return access.token;
-  const r = await cloud.mail(app.account, app.vault.sync.token, 'token', { refreshToken: app.vault.mail.refresh });
-  access = { token: r.accessToken, exp: Date.now() + (r.expiresIn || 3600) * 1000 };
+  const refresh = app.vault.mail.refresh;
+  // Only ever for the sign-in in the vault that's open now (another account may unlock on this device).
+  if (!force && access && access.refresh === refresh && access.exp > Date.now() + 60e3) return access.token;
+  access = null;
+  const r = await cloud.mail(app.account, app.vault.sync.token, 'token', { refreshToken: refresh });
+  if (app.vault?.mail?.refresh !== refresh) throw Object.assign(new Error('locked'), { code: 'locked' });
+  access = { token: r.accessToken, exp: Date.now() + (r.expiresIn || 3600) * 1000, refresh };
   return access.token;
 }
 
@@ -38,16 +42,29 @@ export function checkMail({ quiet = false } = {}) {
     try {
       const { readAlerts } = await import('../gmail.js');
       const { routeAlerts } = await import('../mail.js');
-      const seen = new Set([...(m.seen || []), ...(m.pending || []).map((p) => p.key)]);
-      let res;
-      try { res = await readAlerts(await accessToken(), { since: m.lastCheck, seen }); } catch (e) {
-        if (e.code !== 'expired') throw e;
-        res = await readAlerts(await accessToken(true), { since: m.lastCheck, seen });
+      const vault = app.vault;
+      const read = async () => {
+        const seen = new Set([...(m.seen || []), ...(m.pending || []).map((p) => p.key)]);
+        try { return await readAlerts(await accessToken(), { since: m.lastCheck, seen }); } catch (e) {
+          if (e.code !== 'expired') throw e;
+          return readAlerts(await accessToken(true), { since: m.lastCheck, seen });
+        }
+      };
+      const out = { added: 0, waiting: 0 };
+      let scanned = 0, more = false;
+      // A big backlog (the first time, or after weeks away) comes in batches; the search window only moves
+      // on once everything in it has been read.
+      for (let round = 0; round < 4; round++) {
+        const res = await read();
+        if (app.vault !== vault) return null; // locked meanwhile
+        const r = routeAlerts(vault, res.parsed, { currency: vault.account?.currency || null });
+        out.added += r.added; out.waiting += r.waiting; scanned += res.scanned;
+        more = res.more;
+        if (!more) break;
       }
-      const out = routeAlerts(app.vault, res.parsed, { currency: app.vault.account?.currency || null });
-      m.lastCheck = started;
+      if (!more) m.lastCheck = started;
       m.problem = null;
-      m.last = { at: started, scanned: res.scanned, added: out.added, waiting: out.waiting };
+      m.last = { at: started, scanned, added: out.added, waiting: out.waiting };
       await app.commit({ silent: true });
       if (!quiet || out.added || out.waiting) {
         const bits = [out.added ? `${plural(out.added, 'transaction')} added` : '', out.waiting ? `${out.waiting} to check` : ''].filter(Boolean);
@@ -55,6 +72,7 @@ export function checkMail({ quiet = false } = {}) {
       }
       return out;
     } catch (e) {
+      if (e.code === 'locked' || app.vault?.mail !== m) return null;
       if (e.code === 'mail_reconnect') { m.problem = 'login'; access = null; await app.commit({ silent: true }); }
       if (!quiet) toast(mailMessage(e), { icon: 'warn', color: 'orange' });
       return null;
@@ -76,15 +94,17 @@ export function maybeAutoCheck() {
 const STEPS_ALERTS = 'In your bank’s app or website, look for <b>Alerts</b> or <b>Notifications</b> and turn on email alerts for purchases (set the amount to $0 or $1 to get every one), plus e-Transfers and deposits if you like.';
 
 export async function openMail({ onDone } = {}) {
-  const sheet = openSheet({ title: 'Bank Emails', size: 'full', body: '<div class="empty" style="padding:60px 0"><span class="spinner dark"></span></div>', onClose: () => { stop(); onDone?.(); } });
+  let poll = null, link = null, verifier = null, error = null, busy = false, pasteNote = null, showPaste = false, showSetup = false, finishing = false, closed = false;
+  let picked = null; // keys ticked in the review list
+  let shown = new Set(); // keys the list on screen shows (Skip never drops ones you haven't seen)
+  const stop = () => { clearInterval(poll); poll = null; document.removeEventListener('visibilitychange', onVisible); };
+  const onVisible = () => { if (document.visibilityState === 'visible' && poll) finish(); };
+  const sheet = openSheet({ title: 'Bank Emails', size: 'full', body: '<div class="empty" style="padding:60px 0"><span class="spinner dark"></span></div>', onClose: () => { closed = true; stop(); onDone?.(); } });
   const status = app.demo || !app.account ? { mail: false } : await cloud.serverStatus();
   const { mailState, addAlerts, dismissAlerts, routeAlerts } = await import('../mail.js');
   const { parseAlert, parseEml, sourceOf, KIND_NAMES } = await import('../email-parse.js');
+  if (closed || !app.vault) return;
   if (!app.demo) mailState(app.vault);
-  let poll = null, link = null, verifier = null, error = null, busy = false, pasteNote = null, showPaste = false, showSetup = false;
-  let picked = null; // keys ticked in the review list
-  const stop = () => { clearInterval(poll); poll = null; document.removeEventListener('visibilitychange', onVisible); };
-  const onVisible = () => { if (document.visibilityState === 'visible' && poll) finish(); };
 
   const hero = (ic, color, title, text) => `<div class="sheet-hero" style="padding-top:18px">
     <span class="cat-icon lg" style="--c:var(--${color})">${icon(ic)}</span><div class="name">${title}</div>
@@ -93,6 +113,7 @@ export async function openMail({ onDone } = {}) {
 
   function review() {
     const m = app.vault.mail;
+    shown = new Set(m.pending.map((p) => p.key));
     if (!m.pending.length) return '';
     picked ||= new Set(m.pending.filter((p) => !(p.currency && app.vault.account?.currency && p.currency !== app.vault.account.currency)).map((p) => p.key));
     const groups = new Map();
@@ -191,12 +212,16 @@ export async function openMail({ onDone } = {}) {
     draw();
   }
   async function finish() {
+    if (finishing || !link) return;
+    finishing = true;
     try {
       const r = await cloud.mail(app.account, app.vault.sync.token, 'finish', { state: link.state, verifier });
       if (r.status === 'pending') return;
       stop();
       if (r.status !== 'done') {
-        error = r.status === 'no_scope' ? 'Money needs the “read your email” box ticked on Google’s page to find alerts.' : r.status === 'expired' ? 'That took too long. Try again.' : 'Gmail wasn’t connected. Try again when you’re ready.';
+        error = r.status === 'no_scope' ? 'Money needs the “read your email” box ticked on Google’s page to find alerts.'
+          : r.status === 'other_browser' ? 'Google came back to a different browser than the one Money is open in. On iPhone, open Money in Safari (not from the Home Screen) to connect Gmail; once it’s connected, it works on all your devices.'
+            : r.status === 'expired' ? 'That took too long. Try again.' : 'Gmail wasn’t connected. Try again when you’re ready.';
         link = null; draw(); prepare(); return;
       }
       const m = mailState(app.vault);
@@ -206,7 +231,7 @@ export async function openMail({ onDone } = {}) {
       await app.commit({ silent: true });
       haptic('success');
       await runCheck();
-    } catch (e) { error = mailMessage(e); draw(); }
+    } catch (e) { error = mailMessage(e); draw(); } finally { finishing = false; }
   }
   async function runCheck() {
     busy = true; error = null; draw();
@@ -231,15 +256,16 @@ export async function openMail({ onDone } = {}) {
     }
     const row = e.target.closest('.mail-row');
     if (row) {
+      if (!picked) return;
       haptic();
       const k = row.dataset.key;
       if (picked.has(k)) picked.delete(k); else picked.add(k);
       row.setAttribute('aria-pressed', String(picked.has(k)));
-      const n = app.vault.mail.pending.filter((p) => picked.has(p.key)).length;
+      const n = app.vault.mail.pending.filter((p) => shown.has(p.key) && picked.has(p.key)).length;
       const add = sheet.el.querySelector('[data-act="add"]');
       add.disabled = !n;
       add.innerHTML = `${icon('plus')} Add ${n ? plural(n, 'Transaction') : 'Transactions'}`;
-      sheet.el.querySelector('[data-act="dismiss"]').textContent = `Skip ${n === app.vault.mail.pending.length ? 'All' : 'the Rest'}`;
+      sheet.el.querySelector('[data-act="dismiss"]').textContent = `Skip ${n === shown.size ? 'All' : 'the Rest'}`;
       return;
     }
     const ignore = e.target.closest('[data-ignore]')?.dataset.ignore;
@@ -255,10 +281,11 @@ export async function openMail({ onDone } = {}) {
       return;
     }
     const act = e.target.closest('[data-act]')?.dataset.act;
+    if ((act === 'add' || act === 'dismiss') && (!picked || busy)) return;
     if (act === 'add') {
       haptic('success');
       const m = app.vault.mail;
-      const chosen = m.pending.filter((p) => picked.has(p.key));
+      const chosen = m.pending.filter((p) => picked.has(p.key) && shown.has(p.key));
       const r = addAlerts(app.vault, chosen.map((p) => ({ ...p, ok: true })));
       // The rest stay for later; only an explicit Skip drops them.
       picked = null;
@@ -269,8 +296,9 @@ export async function openMail({ onDone } = {}) {
     }
     if (act === 'dismiss') {
       const m = app.vault.mail;
-      const rest = m.pending.filter((p) => !picked.has(p.key)).map((p) => p.key);
-      dismissAlerts(app.vault, rest.length ? rest : m.pending.map((p) => p.key));
+      const onScreen = m.pending.filter((p) => shown.has(p.key));
+      const rest = onScreen.filter((p) => !picked.has(p.key)).map((p) => p.key);
+      dismissAlerts(app.vault, rest.length ? rest : onScreen.map((p) => p.key));
       picked = null;
       await app.commit({ silent: true });
       draw();

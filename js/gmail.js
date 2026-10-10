@@ -43,19 +43,23 @@ async function get(token, path) {
 export const gmailKey = (id) => mailKey({ id: `gmail:${id}` });
 
 /**
- * Find and read new alert emails. seen: keys already handled. Returns { parsed: [parseAlert results], scanned }.
+ * Find and read new alert emails. seen: keys already handled. Returns { parsed: [parseAlert results], scanned, more }
+ * (more: there were more than `max` new ones; ask again and the next batch comes, since these are now seen).
  * onProgress(done, total) while reading.
  */
 export async function readAlerts(token, { since = null, seen = new Set(), max = 250, today, onProgress } = {}) {
   const q = encodeURIComponent(alertQuery(since));
   const ids = [];
   let page = '';
-  while (ids.length < max) {
+  let more = false;
+  for (let pages = 0; ; pages++) {
     const list = await get(token, `messages?q=${q}&maxResults=100${page ? `&pageToken=${encodeURIComponent(page)}` : ''}`);
     for (const m of list.messages || []) if (!seen.has(gmailKey(m.id))) ids.push(m.id);
     if (!list.nextPageToken) break;
+    if (ids.length >= max || pages >= 40) { more = true; break; }
     page = list.nextPageToken;
   }
+  if (ids.length > max) more = true;
   const todo = ids.slice(0, max);
   const parsed = [];
   let done = 0;
@@ -71,5 +75,5 @@ export async function readAlerts(token, { since = null, seen = new Set(), max = 
     }
   };
   await Promise.all(Array.from({ length: 5 }, worker));
-  return { parsed, scanned: done };
+  return { parsed, scanned: done, more };
 }

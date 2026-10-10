@@ -124,7 +124,7 @@ export function decodeEntities(s) {
 function tidy(s) {
   return String(s)
     .replace(/[​-‍⁠﻿­͏]/g, '')
-    .replace(/[   \t]/g, ' ')
+    .replace(/[\u00a0\u2007\u202f\t]/g, ' ')
     .replace(/[ ]{2,}/g, ' ')
     .split(/\r?\n/).map((l) => l.trim()).join('\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -139,7 +139,7 @@ export function htmlToText(html) {
     .replace(/<\/(p|div|tr|li|h[1-6]|table|section|header|footer|blockquote|center)\s*>/gi, '\n')
     .replace(/<(p|div|tr|li|h[1-6]|table)\b[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/[ \t ]*\|[ \t |]*(?=\n|$)/g, '');
+    .replace(/[ \t\u00a0]*\|[ \t\u00a0|]*(?=\n|$)/g, '');
   return tidy(decodeEntities(s).split('\n').map((l) => l.replace(/^[\s|]+/, '').replace(/(\s*\|\s*)+/g, ' | ')).join('\n'));
 }
 
@@ -176,15 +176,17 @@ function senderOf(from) {
 }
 
 const CUR = String.raw`(?:CA\$|C\$|US\$|A\$|NZ\$|HK\$|S\$|R\$|CDN\$|\$|£|€|¥|₹|Rs\.?|INR|CAD|USD|EUR|GBP|AUD|NZD|CHF|MXN|JPY)`;
-const NUMBER = String.raw`\d{1,3}(?:[,  ]\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?`;
+// "1,234.56" · "1.234,56" / "1 234,56" · "12,50" · "1 234.56" · "45" / "45.00". A plain number never stops just before ",5".
+const NUMBER = String.raw`\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?(?![\d,])|\d{1,3}(?:[.\u00a0 ]\d{3})+,\d{2}(?!\d)|\d+,\d{2}(?![\d,])|\d{1,3}(?:[\u00a0 ]\d{3})+(?:\.\d{1,2})?(?![\d,])|\d+(?:\.\d{1,2})?(?![\d,]|\.\d)`;
 // "$1,234.56", "CAD 45.00", "45.00 USD", "Rs.499", "€12,50"
-const AMOUNT = new RegExp(String.raw`(?:(${CUR})\s?([-−]?)\s?(${NUMBER}|\d+,\d{2})(?![\d])(?:\s?(CAD|USD|EUR|GBP|AUD|INR))?|(?<![\w.,])(${NUMBER}|\d+,\d{2})\s?(CAD|USD|EUR|GBP|AUD|INR|\$|€|£)(?![A-Za-z]))`, 'g');
+const AMOUNT = new RegExp(String.raw`(?:(${CUR})\s?([-−]?)\s?(${NUMBER})(?:\s?(CAD|USD|EUR|GBP|AUD|INR))?|(?<![\w.,])(${NUMBER})\s?(CAD|USD|EUR|GBP|AUD|INR|\$|€|£)(?![A-Za-z]))`, 'g');
 
 function readAmount(m) {
   const sym = m[1] || m[6] || '';
   let n = m[3] || m[5];
-  if (/^\d+,\d{2}$/.test(n)) n = n.replace(',', '.');
-  else n = n.replace(/[,  ]/g, '');
+  // A comma before the last two digits is the decimal point when no comma groups thousands.
+  if (/,\d{2}$/.test(n) && !/,\d{3}/.test(n)) n = n.replace(/[.\u00a0 ]/g, '').replace(',', '.');
+  else n = n.replace(/[,\u00a0 ]/g, '');
   const v = Number(n);
   if (!Number.isFinite(v) || v <= 0 || v > 1e7) return null;
   const code = m[4] || ({ '$': null, 'CA$': 'CAD', 'C$': 'CAD', 'CDN$': 'CAD', 'US$': 'USD', 'A$': 'AUD', 'NZ$': 'NZD', 'HK$': 'HKD', 'S$': 'SGD', 'R$': 'BRL', '£': 'GBP', '€': 'EUR', '¥': 'JPY', '₹': 'INR', 'Rs': 'INR', 'Rs.': 'INR' }[sym] ?? (/^[A-Z]{3}$/.test(sym) ? sym : null));
@@ -218,7 +220,7 @@ const LABELS = {
   date: /^((transaction |purchase |posted |posting |payment |transfer )?date|date (and|&) time|when|date of (transaction|purchase)|transaction date and time|time)$/i,
   type: /^((transaction|payment) type|type)$/i,
 };
-const BAD_MERCHANT = /^(?:your|you|the|this|that|our|a|an|it|us|we|account|card|chequing|checking|savings|visa|mastercard|master card|amex|debit|credit|bank|online|mobile|app|an? (?:atm|merchant|store))(?=\s|$)|^(?:\d|https?:)|\b(account|card) (ending|number|no)\b|\bending (in|with)\b|^[\W\d]+$/i;
+const BAD_MERCHANT = /^(?:a\/c|acc(?:oun)?t|your|you|the|this|that|our|a|an|it|us|we|account|card|chequing|checking|savings|visa|mastercard|master card|amex|debit|credit|bank|online|mobile|app|an? (?:atm|merchant|store))(?=\s|$)|^(?:\d|https?:)|\b(account|card) (ending|number|no)\b|\bending (in|with)\b|^[\W\d]+$/i;
 
 // ---------------------------------------------------------------------------
 // The parser
@@ -240,7 +242,7 @@ export function mailKey(m) {
 /** "---------- Forwarded message ---------" blocks: the forwarded email's own sender, date and subject. */
 function unforward(msg) {
   const t = msg.text || '';
-  const fw = /(?:^|\n)[-_ ]*(?:-{3,}\s*)?(?:forwarded message|original message|begin forwarded message)[\s:-]*\n/i.exec(t);
+  const fw = /(?:^|\n)[-_ ]{0,40}(?:forwarded message|original message|begin forwarded message)[ \t:-]{0,40}\n/i.exec(t);
   if (!fw) return msg;
   const rest = t.slice(fw.index + fw[0].length);
   const lines = rest.split('\n');
@@ -295,21 +297,26 @@ function fields(lines) {
 function merchantNear(sentence, from) {
   // UPI alerts name a payment address before the payee: "to VPA shop@bank SHOP".
   const tail = sentence.slice(from, from + 160).replace(/\bVPA\s+\S+@\S+\s*/gi, '').replace(AMOUNT, ' | ');
-  const PREP = /\b(at|with|to|from|by|for)\s+(?!your\b|you\b|the account\b|an? (?:atm|account)\b)/gi;
+  const PREP = /\b(at|with|to|from|by|for)\s+(?!your\b|you\b|the account\b|an? (?:atm|account)\b|a\/c\b|acc(?:oun)?t\b)/gi;
   let pre;
   while ((pre = PREP.exec(tail))) {
-    let s = tail.slice(pre.index + pre[0].length).split(/\s+(?:on|using|via|by|with your|was|has|have|is|in the amount|from your|to your|into your|ending|through|for your|for the|for a|at \d|at the time|as of|today|yesterday|this|has been)\b|\s[-–—]\s|[.,;!|](?:\s|$)|\s\(|\n/i)[0];
+    let s = tail.slice(pre.index + pre[0].length).split(/\s+(?:on|using|via|by|with your|was|has|have|is|in the amount|from your|to your|into your|ending|through|for your|for the|for a|at \d|at the time|as of|today|yesterday|this|has been|with|card)\b|\s[-–—]\s|[.,;!|](?:\s|$)|\s\(|\n/i)[0];
     s = s.trim().replace(/[.,;:!]+$/, '').replace(/\s+(?:for|of|in|at|to|with)$/i, '').trim();
     if (s && !BAD_MERCHANT.test(s) && s.length >= 2 && s.length <= 60 && /\p{L}/u.test(s)) return { name: s, prep: pre[1].toLowerCase() };
   }
   return null;
 }
 
+/** Words that could be part of a card or account number: "x1234", "(1234)", "4512-34XX", "7890". */
+const NUMBERISH = (w) => (w.match(/\d/g) || []).length >= 3 || (/\d{2}/.test(w) && /[x*•#]/i.test(w)) || /^[(\[]?[x*•#]+\d+[)\]]?$/i.test(w) || /^\(\d+\)$/.test(w);
 function cleanMerchant(raw) {
-  const s = sanitizeDescription(String(raw).replace(/\s*\b(?:in|at) [A-Z][a-z]+,? [A-Z]{2}\b.*$/, ''));
+  const cut = String(raw)
+    .replace(/\s*\b(?:in|at) [A-Z][a-z]+,? [A-Z]{2}\b.*$/, '')
+    .replace(/\s+(?:with|using|on)\s+(?:your\s+)?(?:visa|mastercard|amex|card|debit|credit)\b.*$/i, '');
+  const s = sanitizeDescription(cut.split(/\s+/).filter((w) => !NUMBERISH(w)).join(' '));
   if (!s || BAD_MERCHANT.test(s)) return null;
-  const name = cleanName(s);
-  return name && name !== 'Unknown' ? name : null;
+  const name = cleanName(s).split(' ').filter((w) => !NUMBERISH(w)).join(' ').trim();
+  return name && name !== 'Unknown' && !BAD_MERCHANT.test(name) ? name : null;
 }
 
 /** A date written in the email near the amount, read against the day the email was sent. */
@@ -342,14 +349,15 @@ function accountKind(text) {
  * or { ok: false, key, reason }.
  */
 export function parseAlert(input, { today = iso(new Date()) } = {}) {
-  const msg = unforward(pastedHeaders({ from: '', subject: '', date: '', ...input, text: tidy(input.text || '') }));
+  // Alerts are short; a long email is read only as far as its first 20,000 characters.
+  const msg = unforward(pastedHeaders({ from: '', subject: '', date: '', ...input, text: tidy(String(input.text || '').slice(0, 60000)).slice(0, 20000) }));
   const key = input.key || mailKey(input);
   const sender = senderOf(msg.from);
   const subject = String(msg.subject || '').trim();
   const body = msg.text;
   const all = `${subject}\n${body}`;
   const no = (reason) => ({ ok: false, key, reason, bank: sender.bank });
-  const sent = mailDay(msg.date, today);
+  const sent = ((d) => (d > today ? today : d))(mailDay(msg.date, today));
 
   // 1. Is it about money that moved? A table with an amount and a merchant or date counts as saying so.
   const lines = all.split('\n').filter((l) => l.trim());
@@ -373,15 +381,14 @@ export function parseAlert(input, { today = iso(new Date()) } = {}) {
     let offset = 0;
     for (const sentence of parts) {
       AMOUNT.lastIndex = 0;
+      const words = (TXN_WORDS.test(sentence) ? 3 : 0) + (STRONG_TXN.test(sentence) ? 2 : 0);
       let m;
       while ((m = AMOUNT.exec(sentence))) {
         const a = readAmount(m);
         if (!a) continue;
         const before = sentence.slice(Math.max(0, m.index - 40), m.index);
         const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 40);
-        let score = 0;
-        if (TXN_WORDS.test(sentence)) score += 3;
-        if (STRONG_TXN.test(sentence)) score += 2;
+        let score = words;
         if (f.amount && f.amount.line === li) score += 4;
         if (li === 0 && subject) score += 1; // the subject line
         if (/\b(balance|available|limit|credit available|minimum|points|rewards?|fee waived|up to|save|earn|over|exceed(?:s|ing|ed)?|threshold|more than|greater than|above)\s*(?:is|of|:)?\s*$/i.test(before)) score -= 6;
@@ -400,7 +407,7 @@ export function parseAlert(input, { today = iso(new Date()) } = {}) {
   // 3. Which way, and what kind.
   const sentence = best.sentence;
   const typeText = `${f.type?.value || ''} ${sentence} ${subject}`;
-  const inward = INWARD.test(typeText) && !/\byou(?:'ve| have)? sent\b|\bsent (?:an? )?(?:interac )?e-?transfer to\b/i.test(sentence);
+  const inward = INWARD.test(typeText) && !/\byou(?:'ve| have)? (?:sent|paid)\b|\bsent (?:an? )?(?:interac )?e-?transfer to\b|\b(?:money |e-?)?transfer to\b|\bsent to\b|\bpayment to\b/i.test(`${sentence} ${subject}`);
   let kind = /refund|reversal|reversed|cash ?back/i.test(typeText) ? 'refund'
     : /e-?transfer|sent you|you(?:'ve| have)? sent|transfer/i.test(typeText) ? 'transfer'
       : /withdrawal|withdrawn|withdrew|\batm\b/i.test(typeText) ? 'withdrawal'
@@ -447,7 +454,7 @@ export function parseAlert(input, { today = iso(new Date()) } = {}) {
     const days = new Set(lines.map((l) => dateFrom(l, sent)).filter(Boolean));
     if (days.size === 1) date = [...days][0];
   }
-  if (!date) date = sent;
+  if (!date || date > today) date = sent;
 
   // 6. How sure.
   let score = best.score;
