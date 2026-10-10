@@ -20,7 +20,9 @@ export function openImporter({ welcome = false } = {}) {
   // files: { name, status: 'reading'|'ready'|'error', error, loaded, options, statements: [{ parsed, prep, include, touched }] }
   const files = [];
   let done = null;
-  const sheet = openSheet({ title: 'Add Statements', size: 'full', body: '' });
+  // With an account, Gmail is the way in (checked every hour); statement files are the fallback.
+  const emailFirst = !!app.account && !app.demo;
+  const sheet = openSheet({ title: emailFirst ? 'Add Transactions' : 'Add Statements', size: 'full', body: '' });
   const statements = () => files.flatMap((f, fi) => (f.status === 'ready' ? f.statements.map((s, si) => ({ ...s, f, fi, si })) : []));
 
   const reconcileOf = (x) => x.f.statements[x.si].parsed && x.f.statements[x.si].prep?.reconciliation?.ok;
@@ -77,31 +79,49 @@ export function openImporter({ welcome = false } = {}) {
     const all = statements().sort((a, b) => (a.prep?.id || '').localeCompare(b.prep?.id || ''));
     const ready = all.filter((s) => s.include && !s.prep.sameBatch);
     const pendingOrErr = files.filter((f) => f.status !== 'ready');
-    sheet.setBody(`
-      ${!files.length ? `
+    const mail = app.vault.mail || {};
+    const waiting = mail.pending?.length || 0;
+    const fileRow = `<label class="row with-icon tap"><span class="cat-icon sm" style="--c:var(--blue)">${icon('doc')}</span>
+          <span class="main"><span class="title">Statement Files</span><span class="subtitle">PDF, CSV or OFX from your bank</span></span>${icon('chev-r', 'chev')}
+          <input type="file" accept="${ACCEPT}" multiple hidden id="imp-file"></label>`;
+    const otherRows = `
+        <button class="row with-icon tap" data-act="bank"><span class="cat-icon sm" style="--c:var(--blue)">${icon('arrows')}</span>
+          <span class="main"><span class="title">${app.vault.bank?.accessToken ? 'Sync From Your Bank' : 'Connect Your Bank'}</span><span class="subtitle">${app.vault.bank?.accessToken ? `${esc(app.vault.bank.institution || 'Connected')} · new transactions come in on their own` : 'Through Plaid'}</span></span>${icon('chev-r', 'chev')}</button>
+        <button class="row with-icon tap" data-act="amazon"><span class="cat-icon sm" style="--c:var(--orange)">${icon('box')}</span>
+          <span class="main"><span class="title">Amazon Orders</span><span class="subtitle">What each Amazon charge bought</span></span>${icon('chev-r', 'chev')}</button>`;
+    const start = !files.length && emailFirst
+      ? `
+        <div class="sheet-hero" style="padding-top:18px">
+          <span class="cat-icon lg" style="--c:var(--indigo)">${icon('envelope')}</span>
+          <div class="name">${mail.connected ? 'Gmail is connected' : 'Connect your Gmail'}</div>
+          <p class="when" style="max-width:350px;margin:8px auto 0">${mail.connected
+            ? `Your bank’s alert emails are checked every hour, and each purchase is recorded and categorized on its own.${mail.lastCheck ? ` Last checked ${esc(new Date(mail.lastCheck).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).replace(/\.$/, ''))}.` : ''}`
+            : 'Your bank emails you every time your card is used. Money checks those emails every hour, then records and categorizes each purchase. No statements to download.'}</p>
+        </div>
+        ${mail.connected
+          ? `<button class="btn" data-act="mail-check" style="margin-top:8px">${icon('arrows')} Check Gmail Now</button>
+             <button class="btn secondary" data-act="mail" style="margin-top:10px">${waiting ? `${plural(waiting, 'Transaction')} to Check` : 'Bank Emails'}</button>`
+          : `<button class="btn" data-act="mail" style="margin-top:8px">${icon('envelope')} Connect Gmail</button>`}
+        <div class="list-head"><span>Other ways to add</span></div>
+        <div class="list">${fileRow}${otherRows}</div>`
+      : !files.length
+        ? `
         <div class="sheet-hero" style="padding-top:18px">
           <span class="cat-icon lg" style="--c:var(--blue)">${icon('doc')}</span>
           <div class="name">${welcome ? 'Welcome! Add your statements' : 'Add Statements'}</div>
           <p class="when" style="max-width:350px;margin:8px auto 0">PDF statements from any bank, or the CSV, OFX or QIF file your online banking lets you download. They’re read right here on your device. Nothing is uploaded, and the file itself isn’t kept.</p>
-        </div>` : ''}
-      <label class="btn ${files.length ? 'secondary' : ''}" style="margin-top:8px">
-        ${icon('plus')} ${files.length ? 'Choose More Files' : 'Choose Files'}
-        <input type="file" accept="${ACCEPT}" multiple hidden id="imp-file">
-      </label>
-      ${!files.length ? `<div class="list-head"><span>Other ways to add</span></div>
-      <div class="list">
-        <button class="row with-icon tap" data-act="mail"><span class="cat-icon sm" style="--c:var(--indigo)">${icon('envelope')}</span>
-          <span class="main"><span class="title">Bank Emails</span><span class="subtitle">${app.vault.mail?.pending?.length ? `${app.vault.mail.pending.length} to check` : 'Gmail, checked every hour: no statements needed'}</span></span>${icon('chev-r', 'chev')}</button>
-        <button class="row with-icon tap" data-act="bank"><span class="cat-icon sm" style="--c:var(--blue)">${icon('arrows')}</span>
-          <span class="main"><span class="title">${app.vault.bank?.accessToken ? 'Sync From Your Bank' : 'Connect Your Bank'}</span><span class="subtitle">${app.vault.bank?.accessToken ? `${esc(app.vault.bank.institution || 'Connected')} · new transactions come in on their own` : 'New transactions come in on their own'}</span></span>${icon('chev-r', 'chev')}</button>
-        <button class="row with-icon tap" data-act="amazon"><span class="cat-icon sm" style="--c:var(--orange)">${icon('box')}</span>
-          <span class="main"><span class="title">Amazon Orders</span><span class="subtitle">See what each Amazon charge bought</span></span>${icon('chev-r', 'chev')}</button>
-      </div>` : ''}
+        </div>
+        <label class="btn" style="margin-top:8px">${icon('plus')} Choose Files<input type="file" accept="${ACCEPT}" multiple hidden id="imp-file"></label>
+        <div class="list-head"><span>Other ways to add</span></div>
+        <div class="list">${otherRows}</div>`
+        : `<label class="btn secondary" style="margin-top:8px">${icon('plus')} Choose More Files<input type="file" accept="${ACCEPT}" multiple hidden id="imp-file"></label>`;
+    sheet.setBody(`
+      ${start}
       ${pendingOrErr.map(fileCard).join('')}
       <div id="imp-items">${all.map(card).join('')}</div>
       ${all.length ? `<div class="btn-row" style="position:sticky;bottom:0;padding:12px 0 4px;background:linear-gradient(transparent,var(--sheet-bg) 30%)">
         <button class="btn" data-act="commit" ${ready.length ? '' : 'disabled'}>${ready.length ? `Add ${plural(ready.length, 'Statement')}` : 'Nothing to add yet'}</button></div>` : ''}
-      <p class="list-foot">Each statement is checked: opening balance + deposits − withdrawals must equal the closing balance, and every running balance must add up. Money in and out is read from the columns, signs and balances. Reversals and waived fees are netted out automatically.</p>`);
+      ${files.length || !emailFirst ? '<p class="list-foot">Each statement is checked: opening balance + deposits − withdrawals must equal the closing balance, and every running balance must add up. Money in and out is read from the columns, signs and balances. Reversals and waived fees are netted out automatically.</p>' : ''}`);
   };
 
   const fileCard = (f) => {
@@ -264,7 +284,15 @@ export function openImporter({ welcome = false } = {}) {
     }
     if (act === 'bank') { haptic(); (await import('./bank.js')).openBank(); return; }
     if (act === 'amazon') { haptic(); (await import('./amazon-import.js')).openAmazonImport(); return; }
-    if (act === 'mail') { haptic(); (await import('./mail.js')).openMail(); return; }
+    if (act === 'mail') { haptic(); (await import('./mail.js')).openMail({ onDone: draw }); return; }
+    if (act === 'mail-check') {
+      haptic();
+      const btn = e.target.closest('[data-act]');
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Checking…';
+      await (await import('./mail.js')).pullMail({ check: true });
+      draw();
+      return;
+    }
     if (act === 'teach') { (await import('./teach.js')).openTeach({ onDone: () => { done.unknown = 0; draw(); } }); }
     if (act === 'push') { const s = await import('./settings.js'); await s.saveToRepo(); sheet.close(); }
     if (act === 'export') { const s = await import('./settings.js'); await s.exportVault(); }

@@ -17,7 +17,7 @@ export function renderOverview(page) {
   const bal = currentBalance(m);
   const who = (app.account || (app.demo ? 'sample' : 'me')).replace(/[^a-z0-9]/gi, '').slice(0, 1).toUpperCase() || 'M';
   const right = `
-    <button class="glass-btn" data-act="add" aria-label="Add statement">${icon('plus')}</button>
+    <button class="glass-btn" data-act="add" aria-label="Add transactions">${icon('plus')}</button>
     <button class="avatar-btn" data-act="settings" aria-label="Settings">${esc(who)}${app.isDirty() ? '<span class="badge-dot"></span>' : ''}</button>`;
   const sub = esc(new Date().toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }));
 
