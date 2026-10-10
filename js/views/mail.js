@@ -159,11 +159,10 @@ export async function openMail({ onDone } = {}) {
       return `<div class="list-head"><span>Gmail</span></div>
         ${m.problem === 'forbidden' ? `<p class="list-foot neg" style="margin-top:0">Gmail said no. Make sure the Gmail API is switched on in the Google Cloud project.</p>` : ''}
         <div class="list">
-          <div class="row with-icon"><span class="cat-icon sm" style="--c:var(--${m.problem ? 'orange' : 'green'})">${icon('envelope')}</span><span class="main"><span class="title">Gmail connected</span><span class="subtitle">Read-only · checked every hour, even with Money closed</span></span></div>
-          <div class="row"><span class="main"><span class="title">Last checked</span>${m.last ? `<span class="subtitle">${m.last.scanned ? `${plural(m.last.scanned, 'new email')} read · ${m.last.added} added${m.last.waiting ? ` · ${m.last.waiting} to check` : ''}` : 'No new emails'}</span>` : ''}</span><span class="detail">${m.lastCheck ? esc(when(m.lastCheck)) : 'Never'}</span></div>
+          <div class="row with-icon"><span class="cat-icon sm" style="--c:var(--${m.problem ? 'orange' : 'green'})">${icon('envelope')}</span><span class="main"><span class="title">Gmail connected</span><span class="subtitle">Checked every hour, even with Money closed</span></span></div>
+          <div class="row"><span class="main"><span class="title">${m.lastCheck ? `Last checked ${esc(when(m.lastCheck))}` : 'Not checked yet'}</span>${m.last ? `<span class="subtitle">${m.last.scanned ? `${plural(m.last.scanned, 'new email')} read · ${m.last.added} recorded${m.last.waiting ? ` · ${m.last.waiting} to check` : ''}` : 'No new emails'}</span>` : ''}</span></div>
         </div>
-        <div class="btn-row"><button class="btn" data-act="check" ${busy ? 'disabled' : ''}>${busy ? '<span class="spinner"></span> Reading…' : `${icon('arrows')} Check Now`}</button>
-          <button class="btn secondary destructive" data-act="disconnect">Disconnect Gmail</button></div>`;
+        <button class="btn" data-act="check" style="margin-top:12px" ${busy ? 'disabled' : ''}>${busy ? '<span class="spinner"></span> Checking…' : `${icon('arrows')} Check Now`}</button>`;
     }
     return `<div class="list-head"><span>Gmail</span></div>
       ${m.problem === 'login' ? `<div class="banner" style="--c:var(--orange)"><span class="ic">${icon('warn')}</span><span class="txt"><b>Sign in to Gmail again</b><span>Google ended the connection. Connect again to keep recording transactions.</span></span></div>` : ''}
@@ -198,6 +197,7 @@ export async function openMail({ onDone } = {}) {
       </div>
       <div class="list-head"><span>Getting alerts</span></div>
       <p class="list-foot" style="margin-top:0">${STEPS_ALERTS} Alerts that go to a different address can be forwarded to the Gmail you connect, or pasted here.</p>
+      ${m.connected ? `<div class="list" style="margin-top:22px"><button class="row tap" data-act="disconnect"><span class="main"><span class="title" style="color:var(--red)">Disconnect Gmail</span></span></button></div>` : ''}
       <p class="list-foot">The hourly check runs on your Money server: it keeps the Gmail sign-in encrypted, and locks any alert emails it finds so only your own devices can open them. They’re deleted from the server as soon as Money has read them. Only the date, amount, a cleaned-up store name and which bank sent it are kept, inside your encrypted vault; card and account numbers never are. One-time codes, ads, statements-ready notes, reminders and declined purchases are skipped.</p>`);
   };
 

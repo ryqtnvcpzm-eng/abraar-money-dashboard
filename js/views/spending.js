@@ -15,8 +15,9 @@ export function renderSpending(page) {
   const m = app.model;
   const span = dataSpan(m);
   if (!span) {
-    page.innerHTML = pageFrame({ title: 'Spending', body: `<div class="card"><div class="empty"><div class="ic">${icon('spending')}</div><h3>No spending yet</h3><p>Add a statement or connect your bank to see where your money goes.</p></div></div>` });
+    page.innerHTML = pageFrame({ title: 'Spending', body: `<div class="card"><div class="empty"><div class="ic">${icon('spending')}</div><h3>No spending yet</h3><p>${app.account && !app.demo ? 'Connect Gmail and each purchase your bank emails you about shows up here.' : 'Add a statement to see where your money goes.'}</p><button class="btn" data-act="add" style="max-width:260px;margin-top:12px">${app.account && !app.demo ? 'Add Transactions' : 'Add Statement'}</button></div></div>` });
     wireLargeTitle(page);
+    page.onclick = async (e) => { if (e.target.closest('[data-act="add"]')) (await import('./importer.js')).openImporter(); };
     return;
   }
   const kind = app.ui.spKind === 'year' ? 'year' : 'month';
@@ -203,7 +204,7 @@ function budgetCard(m, p, kind, span) {
   return `<button class="card budget-card" data-act="budget">
     <div class="bc-top"><span class="bc-k">${live ? 'Left to spend' : left >= 0 ? 'Under budget' : 'Over budget'}</span><span class="bc-v num ${left < 0 ? 'neg' : ''}">${m0(Math.abs(left) * 100)}</span>${icon('chev-r', 'chev')}</div>
     <span class="bar"><i style="--c:var(--${color});width:${Math.min(100, ratio * 100)}%"></i>${live ? `<b class="today" style="left:${Math.min(100, (day / daysInMonth(p.key)) * 100)}%"></b>` : ''}</span>
-    <div class="bc-sub">${live && left > 0 && daysLeft > 0 ? `About <b>${m0((left / daysLeft) * 100)}</b> a day for the ${daysLeft} days left. ` : ''}${m0(pm.spent * 100)} of ${m0(t.spend * 100)} budget spent.</div>
+    <div class="bc-sub">${live && left > 0 && daysLeft > 0 ? `About <b>${m0((left / daysLeft) * 100)}</b> a day for the ${daysLeft} days left. ` : ''}${m0(pm.spent * 100)} of your ${m0(t.spend * 100)} budget used, bills included.</div>
   </button>`;
 }
 
