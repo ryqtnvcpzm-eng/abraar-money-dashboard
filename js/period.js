@@ -125,3 +125,20 @@ export function dayTotals(model, mode = 'everything') {
   }
   return out;
 }
+
+/**
+ * Running total of spending (cents, refunds netted) for each day from `from` to `to`;
+ * days after `stopAt` (still to come) are null.
+ */
+export function cumulative(model, from, to, mode, stopAt = to) {
+  const days = daily(model, mode);
+  const out = [];
+  let run = 0;
+  for (let d = from; d <= to; d = addDays(d, 1)) {
+    if (d > stopAt) { out.push(null); continue; }
+    const cats = days.get(d);
+    if (cats) for (const c of cats.values()) run += c;
+    out.push(run);
+  }
+  return out;
+}
