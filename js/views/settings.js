@@ -49,6 +49,7 @@ export function openSettings() {
         ${row('plus', 'blue', 'Add Statement', { act: 'add' })}
         ${row('doc', 'indigo', 'Statements', { detail: String(app.model.statements.length), act: 'statements' })}
         ${row('arrows', 'blue', 'Bank Sync', { sub: v.bank?.accessToken ? `${v.bank.institution || 'Connected'}${v.bank.problem ? ' · needs you to sign in again' : ''}` : 'Pull new transactions from your bank', act: 'bank' })}
+        ${row('envelope', 'indigo', 'Bank Emails', { sub: v.mail?.refresh ? `Gmail connected${v.mail.pending?.length ? ` · ${v.mail.pending.length} to check` : ''}` : v.mail?.pending?.length ? `${v.mail.pending.length} to check` : 'Add purchases from your bank’s email alerts', act: 'mail' })}
         ${row('box', 'orange', 'Amazon Orders', { sub: 'Sort Amazon charges by what you bought', act: 'amazon' })}
         ${row('tag', 'orange', 'Merchant Rules', { detail: String((v.userRules || []).length), act: 'rules' })}
         ${row('rings', 'green', 'Budget', { sub: v.plan ? `${money(v.plan.takeHome, { cents: false })} take-home · save ${v.plan.savePct}%` : 'Set a monthly budget and savings goal', act: 'budget' })}
@@ -112,6 +113,7 @@ export function openSettings() {
     if (act === 'rules') openRules(draw);
     if (act === 'amazon') (await import('./amazon-import.js')).openAmazonImport();
     if (act === 'bank') (await import('./bank.js')).openBank({ onDone: draw });
+    if (act === 'mail') (await import('./mail.js')).openMail({ onDone: draw });
     if (act === 'budget') (await import('./budget.js')).openBudget();
     if (act === 'csv') exportCsv();
     if (act === 'autolock') pickAutoLock(draw);

@@ -234,12 +234,17 @@ export async function deleteAccount(username, token) {
   return call('DELETE', `accounts/${encodeURIComponent(username)}`, { token });
 }
 
-/** What the server offers: { configured, bank }. Never throws. */
+/** What the server offers: { configured, bank, mail }. Never throws. */
 export async function serverStatus() {
-  try { return await call('GET', 'status'); } catch { return { configured: false, bank: false }; }
+  try { return await call('GET', 'status'); } catch { return { configured: false, bank: false, mail: false }; }
 }
 
 /** Bank sync through the Worker (it adds the Plaid secret and keeps nothing). action: link | finish | sync | remove */
 export function bank(username, token, action, body = {}) {
   return call('POST', `accounts/${encodeURIComponent(username)}/bank/${action}`, { token, body });
+}
+
+/** Gmail sign-in through the Worker (it adds the Google secret; email never goes through it). action: link | finish | token | remove */
+export function mail(username, token, action, body = {}) {
+  return call('POST', `accounts/${encodeURIComponent(username)}/mail/${action}`, { token, body });
 }

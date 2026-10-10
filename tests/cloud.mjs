@@ -22,7 +22,32 @@ const env = { DB: fakeD1(), INVITE_CODE: 'family-2026' };
 // Plaid calls the Worker makes go to a stand-in; everything else goes to the Worker.
 const plaid = plaidMock();
 let liveEnv = env;
+// A stand-in for Google's sign-in token endpoint (only what Gmail connect uses).
+const google = { codes: new Map(), refresh: new Set(), revoked: [], scope: 'https://www.googleapis.com/auth/gmail.readonly' };
+const b64u = (buf) => Buffer.from(buf).toString('base64url');
+async function googleHandle(path, form) {
+  const out = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  if (form.get('client_id') !== 'g-client' && path !== '/revoke') return out(401, { error: 'invalid_client' });
+  if (path === '/revoke') { google.revoked.push(form.get('token')); google.refresh.delete(form.get('token')); return out(200, {}); }
+  if (form.get('client_secret') !== 'g-secret') return out(401, { error: 'invalid_client' });
+  if (form.get('grant_type') === 'authorization_code') {
+    const c = google.codes.get(form.get('code'));
+    google.codes.delete(form.get('code'));
+    if (!c || c.redirect !== form.get('redirect_uri')) return out(400, { error: 'invalid_grant' });
+    const digest = b64u(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(form.get('code_verifier') || '')));
+    if (digest !== c.challenge) return out(400, { error: 'invalid_grant' });
+    const refresh = `1//test-refresh-${crypto.randomUUID()}`;
+    google.refresh.add(refresh);
+    return out(200, { access_token: 'ya29.test-access', expires_in: 3599, refresh_token: refresh, scope: c.scope ?? google.scope, token_type: 'Bearer' });
+  }
+  if (form.get('grant_type') === 'refresh_token') {
+    if (!google.refresh.has(form.get('refresh_token'))) return out(400, { error: 'invalid_grant' });
+    return out(200, { access_token: 'ya29.test-access-2', expires_in: 3599, scope: google.scope, token_type: 'Bearer' });
+  }
+  return out(400, { error: 'unsupported_grant_type' });
+}
 globalThis.fetch = async (url, init = {}) => {
+  if (String(url).startsWith('https://google.test/')) return googleHandle(new URL(String(url)).pathname, new URLSearchParams(init.body));
   if (String(url).startsWith(plaid.base)) {
     const r = plaid.handle(new URL(String(url)).pathname, JSON.parse(init.body));
     return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'Content-Type': 'application/json' } });
@@ -279,6 +304,117 @@ await test('bank errors come back with Plaid’s code', async () => {
 await test('disconnect removes the connection at Plaid', async () => {
   await cloud.bank('banker', C.token, 'remove', { accessToken: access });
   try { await cloud.bank('banker', C.token, 'sync', { accessToken: access, cursor: '' }); assert.fail('should throw'); } catch (e) { assert.equal(e.plaid, 'INVALID_ACCESS_TOKEN'); }
+  liveEnv = env;
+});
+
+
+console.log('Bank emails: Gmail sign-in (through a stand-in for Google)');
+const gEnv = { GOOGLE_CLIENT_ID: 'g-client', GOOGLE_CLIENT_SECRET: 'g-secret', GOOGLE_BASE: 'https://google.test' };
+const pkcePair = async () => {
+  const verifier = b64u(crypto.getRandomValues(new Uint8Array(32)));
+  return { verifier, challenge: b64u(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))) };
+};
+// Google's page: the person says yes, and Google sends the browser to the callback with a code.
+// The app asks for the link (the browser keeps the cookie that comes with it).
+async function mailLink(user, token, challenge) {
+  const r = await worker.fetch(new Request(`https://money.test/api/v1/accounts/${user}/mail/link`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge }) }), liveEnv);
+  const cookie = (r.headers.get('Set-Cookie') || '').split(';')[0];
+  return { ...(await r.json()), cookie, setCookie: r.headers.get('Set-Cookie') };
+}
+async function consent(authUrl, { scope, deny = false, cookie = '' } = {}) {
+  const u = new URL(authUrl);
+  const code = `4/test-code-${crypto.randomUUID()}`;
+  google.codes.set(code, { challenge: u.searchParams.get('code_challenge'), redirect: u.searchParams.get('redirect_uri'), scope });
+  const back = new URL(u.searchParams.get('redirect_uri'));
+  back.searchParams.set('state', u.searchParams.get('state'));
+  if (deny) back.searchParams.set('error', 'access_denied'); else back.searchParams.set('code', code);
+  return worker.fetch(new Request(back, { headers: cookie ? { Cookie: cookie } : {} }), liveEnv);
+}
+let G, gRefresh;
+await test('off until the Google keys are set', async () => {
+  G = await cloud.createAccount({ invite: 'family-2026', username: 'mailer', passphrase: 'blue lantern quiet meadow', vault: emptyVault() });
+  assert.equal((await cloud.serverStatus()).mail, false);
+  await rejects(cloud.mail('mailer', G.token, 'link', { challenge: 'x'.repeat(43) }), 'mail_not_configured');
+  liveEnv = { ...env, ...gEnv };
+  assert.equal((await cloud.serverStatus()).mail, true);
+});
+await test('every mail call needs the account’s token', async () => {
+  await rejects(cloud.mail('mailer', 'not-the-token', 'link', { challenge: 'x'.repeat(43) }), 'unauthorized');
+  await rejects(cloud.mail('abraar', G.token, 'token', { refreshToken: '1//whatever-long-enough' }), 'unauthorized');
+});
+await test('connect: Google’s page, read-only Gmail, PKCE, and the token only reaches the browser', async () => {
+  const p = await pkcePair();
+  const link = await mailLink('mailer', G.token, p.challenge);
+  assert.match(link.setCookie, /^__Host-money-mail=[0-9a-f]{64}; Path=\/; Secure; HttpOnly; SameSite=Lax/);
+  const u = new URL(link.url);
+  assert.equal(u.origin + u.pathname, 'https://google.test/auth');
+  assert.equal(u.searchParams.get('scope'), 'https://www.googleapis.com/auth/gmail.readonly');
+  assert.equal(u.searchParams.get('redirect_uri'), 'https://money.test/api/v1/mail/callback');
+  assert.equal(u.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(u.searchParams.get('access_type'), 'offline');
+  assert.ok(!link.url.includes('g-secret'));
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'pending');
+  const back = await consent(link.url, { cookie: link.cookie });
+  assert.equal(back.status, 302);
+  assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html');
+  // The waiting code is stored under a hash of the state, never the state itself.
+  const row = await env.DB.prepare('SELECT * FROM mail_handoff').first();
+  assert.ok(row && row.state_hash !== link.state && row.username === 'mailer');
+  // Someone else's account, or the wrong verifier, gets nothing.
+  const H = await cloud.createAccount({ invite: 'family-2026', username: 'snooper', passphrase: 'red teapot windy harbour', vault: emptyVault() });
+  assert.equal((await cloud.mail('snooper', H.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'expired');
+  const done = await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier });
+  assert.equal(done.status, 'done');
+  assert.match(done.refreshToken, /^1\/\/test-refresh-/);
+  assert.equal(done.accessToken, 'ya29.test-access');
+  gRefresh = done.refreshToken;
+  assert.equal(await env.DB.prepare('SELECT COUNT(*) AS n FROM mail_handoff').first().then((r) => r.n), 0, 'the server keeps nothing');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'expired', 'a code works once');
+});
+await test('a wrong PKCE verifier can’t turn the code into a token', async () => {
+  const p = await pkcePair();
+  const link = await mailLink('mailer', G.token, p.challenge);
+  await consent(link.url, { cookie: link.cookie });
+  const other = await pkcePair();
+  await rejects(cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: other.verifier }), 'mail_reconnect');
+});
+await test('saying no, or unticking Gmail, is reported (and the grant is revoked)', async () => {
+  let p = await pkcePair();
+  let link = await mailLink('mailer', G.token, p.challenge);
+  const back = await consent(link.url, { deny: true, cookie: link.cookie });
+  assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'exited');
+  p = await pkcePair();
+  link = await mailLink('mailer', G.token, p.challenge);
+  await consent(link.url, { scope: 'openid', cookie: link.cookie });
+  const before = google.revoked.length;
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'no_scope');
+  assert.equal(google.revoked.length, before + 1);
+});
+await test('someone else’s sign-in link can’t collect your Gmail (the code only counts in the browser that asked)', async () => {
+  // An account holder makes a link and sends it to someone; that person says yes in their own browser.
+  const p = await pkcePair();
+  const link = await mailLink('mailer', G.token, p.challenge);
+  const back = await consent(link.url); // no cookie: a different browser
+  assert.equal(back.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: link.state, verifier: p.verifier })).status, 'other_browser');
+  // A cookie from another link doesn't count either.
+  const p2 = await pkcePair();
+  const l2 = await mailLink('mailer', G.token, p2.challenge);
+  const l3 = await mailLink('snooper', (await cloud.signIn('snooper', 'red teapot windy harbour')).token, p2.challenge);
+  await consent(l2.url, { cookie: l3.cookie });
+  assert.equal((await cloud.mail('mailer', G.token, 'finish', { state: l2.state, verifier: p2.verifier })).status, 'other_browser');
+});
+await test('a made-up state at the callback goes nowhere', async () => {
+  const r = await worker.fetch(new Request(`https://money.test/api/v1/mail/callback?state=${'ab'.repeat(32)}&code=4/x`), liveEnv);
+  assert.equal(r.headers.get('Location'), 'https://money.test/mail-done.html?error=1');
+});
+await test('fresh Gmail access from the saved sign-in; a revoked one asks to reconnect', async () => {
+  const t = await cloud.mail('mailer', G.token, 'token', { refreshToken: gRefresh });
+  assert.equal(t.accessToken, 'ya29.test-access-2');
+  await cloud.mail('mailer', G.token, 'remove', { refreshToken: gRefresh });
+  assert.ok(google.revoked.includes(gRefresh));
+  await rejects(cloud.mail('mailer', G.token, 'token', { refreshToken: gRefresh }), 'mail_reconnect');
   liveEnv = env;
 });
 

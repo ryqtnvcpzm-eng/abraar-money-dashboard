@@ -19,10 +19,21 @@
 //   POST   /api/v1/accounts/:user/bank/finish  Bearer token { linkToken } -> { status, accessToken?, institution?, accounts? }
 //   POST   /api/v1/accounts/:user/bank/sync    Bearer token { accessToken, cursor, accountId } -> { added, modified, removed, cursor, accounts }
 //   POST   /api/v1/accounts/:user/bank/remove  Bearer token { accessToken } -> 204
+//   POST   /api/v1/accounts/:user/mail/link    Bearer token { challenge } -> { state, url }
+//   GET    /api/v1/mail/callback               (Google sends the browser here) -> 302 /mail-done.html
+//   POST   /api/v1/accounts/:user/mail/finish  Bearer token { state, verifier } -> { status, refreshToken?, accessToken?, expiresIn? }
+//   POST   /api/v1/accounts/:user/mail/token   Bearer token { refreshToken } -> { accessToken, expiresIn }
+//   POST   /api/v1/accounts/:user/mail/remove  Bearer token { refreshToken } -> 204
 //
 // Bank sync (optional, Plaid): the browser keeps the Plaid access token inside its encrypted vault and
 // sends it with each sync. The Worker adds the Plaid secret, relays the call and keeps nothing:
 // transactions pass through in memory only. Account numbers (even Plaid's last-4 "mask") are dropped.
+//
+// Bank emails (optional, Gmail): Google signs you in and sends a one-time code here, which waits (for at
+// most 15 minutes, under a hash of a random state) until the app collects it. Turning the code into a
+// token needs both the Google client secret (here) and a PKCE verifier only the app has. The long-lived
+// token then lives in the encrypted vault like the Plaid one. Email is read by the browser, straight from
+// Gmail: no email ever passes through this Worker.
 //
 // Recovery: the browser can wrap the vault key with a random recovery key the owner saves
 // (AES-GCM, key from HKDF of the recovery key). The server only stores that wrapped blob, which is
@@ -31,6 +42,7 @@
 // Bindings: DB (D1). Secret: INVITE_CODE (needed to create accounts).
 // Optional, for bank sync: PLAID_CLIENT_ID, PLAID_SECRET (secret), PLAID_ENV ("production" or "sandbox"),
 // PLAID_COUNTRIES (default "CA,US").
+// Optional, for bank emails: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET (secret).
 
 const HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
@@ -60,6 +72,7 @@ async function ensureSchema(db) {
     db.prepare('CREATE TABLE IF NOT EXISTS failures (username TEXT PRIMARY KEY, count INTEGER NOT NULL, window_start INTEGER NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS recovery (username TEXT PRIMARY KEY, blob TEXT NOT NULL, updated_at TEXT NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)'),
+    db.prepare('CREATE TABLE IF NOT EXISTS mail_handoff (state_hash TEXT PRIMARY KEY, username TEXT NOT NULL, browser_hash TEXT NOT NULL, code TEXT, error TEXT, created INTEGER NOT NULL)'),
   ]);
   // A random secret made once per site, for the fake answers about unknown usernames.
   const fresh = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -260,10 +273,131 @@ async function bankRoute(action, req, env, url, username) {
   return err(404, 'not_found');
 }
 
+// ---------------------------------------------------------------------------
+// Bank emails through Gmail (Google sign-in; the browser reads the mail itself)
+// ---------------------------------------------------------------------------
+const mailOn = (env) => !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+const googleBase = (env) => (/^(https:\/\/|http:\/\/localhost[:/])/.test(env.GOOGLE_BASE || '') ? env.GOOGLE_BASE.replace(/\/+$/, '') : null);
+const googleUrl = (env, what) => {
+  const test = googleBase(env);
+  if (test) return `${test}/${what}`;
+  return { auth: 'https://accounts.google.com/o/oauth2/v2/auth', token: 'https://oauth2.googleapis.com/token', revoke: 'https://oauth2.googleapis.com/revoke' }[what];
+};
+const STATE_RE = /^[0-9a-f]{64}$/;
+const PKCE_RE = /^[A-Za-z0-9_-]{43,128}$/;
+const REFRESH_RE = /^[\w./~+-]{20,512}$/;
+const HANDOFF_TTL = 15 * 60; // seconds
+
+async function google(env, what, form) {
+  let res, data;
+  try {
+    res = await fetch(googleUrl(env, what), { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(form).toString() });
+    data = what === 'revoke' ? {} : await res.json();
+  } catch {
+    throw Object.assign(new Error('mail_unreachable'), { status: 502 });
+  }
+  if (!res.ok) {
+    // An expired or revoked sign-in needs Google again; anything else is Google's error code (never our secret).
+    if (data?.error === 'invalid_grant') throw Object.assign(new Error('mail_reconnect'), { status: 400 });
+    throw Object.assign(new Error('mail_error'), { status: 502, extra: { google: String(data?.error || res.status).slice(0, 60) } });
+  }
+  return data;
+}
+
+// The browser that asked for the sign-in link gets this cookie; Google's code is only accepted in a browser
+// that has it. Without it, someone could send you their own sign-in link and collect your Gmail access.
+const MAIL_COOKIE = '__Host-money-mail';
+const cookieOf = (req, name) => (String(req.headers.get('Cookie') || '').split(/;\s*/).find((c) => c.startsWith(`${name}=`)) || '').slice(name.length + 1);
+
+async function mailCallback(req, env, url) {
+  const done = (ok) => new Response(null, { status: 302, headers: {
+    Location: `${url.origin}/mail-done.html${ok ? '' : '?error=1'}`, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+    'Set-Cookie': `${MAIL_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+  } });
+  const state = url.searchParams.get('state') || '';
+  if (!env.DB || !mailOn(env) || !STATE_RE.test(state)) return done(false);
+  await ensureSchema(env.DB);
+  const code = url.searchParams.get('code');
+  const now = Math.floor(Date.now() / 1000);
+  const browser = cookieOf(req, MAIL_COOKIE);
+  const hash = await sha256hex(state);
+  const fresh = 'state_hash = ? AND code IS NULL AND error IS NULL AND created > ?';
+  if (!/^[0-9a-f]{64}$/.test(browser)) {
+    // Google came back to a different browser than the one Money is in (or to someone else's): no code.
+    await env.DB.prepare(`UPDATE mail_handoff SET error = 'other_browser' WHERE ${fresh}`).bind(hash, now - HANDOFF_TTL).run();
+    return done(false);
+  }
+  const ok = !!code && code.length < 2048;
+  const r = await env.DB.prepare(`UPDATE mail_handoff SET code = ?, error = ? WHERE ${fresh} AND browser_hash = ?`)
+    .bind(ok ? code : null, ok ? null : String(url.searchParams.get('error') || 'cancelled').slice(0, 60), hash, now - HANDOFF_TTL, await sha256hex(browser)).run();
+  if (r.meta?.changes !== 1) await env.DB.prepare(`UPDATE mail_handoff SET error = 'other_browser' WHERE ${fresh}`).bind(hash, now - HANDOFF_TTL).run();
+  return done(ok && r.meta?.changes === 1);
+}
+
+async function mailRoute(action, req, env, url, username) {
+  if (!mailOn(env)) return err(503, 'mail_not_configured');
+  const b = await body(req);
+  const db = env.DB;
+  const now = Math.floor(Date.now() / 1000);
+  if (action === 'link') {
+    if (typeof b.challenge !== 'string' || !PKCE_RE.test(b.challenge)) return err(400, 'bad_request');
+    const rand = () => [...crypto.getRandomValues(new Uint8Array(32))].map((x) => x.toString(16).padStart(2, '0')).join('');
+    const state = rand(), browser = rand();
+    await db.batch([
+      db.prepare('DELETE FROM mail_handoff WHERE created < ? OR username = ?').bind(now - HANDOFF_TTL, username),
+      db.prepare('INSERT INTO mail_handoff (state_hash, username, browser_hash, code, error, created) VALUES (?, ?, ?, NULL, NULL, ?)').bind(await sha256hex(state), username, await sha256hex(browser), now),
+    ]);
+    const q = new URLSearchParams({
+      client_id: env.GOOGLE_CLIENT_ID, redirect_uri: `${url.origin}/api/v1/mail/callback`, response_type: 'code', scope: GMAIL_SCOPE,
+      access_type: 'offline', prompt: 'consent', include_granted_scopes: 'false', state, code_challenge: b.challenge, code_challenge_method: 'S256',
+    });
+    const res = json({ state, url: `${googleUrl(env, 'auth')}?${q}` });
+    res.headers.set('Set-Cookie', `${MAIL_COOKIE}=${browser}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${HANDOFF_TTL}`);
+    return res;
+  }
+  if (action === 'finish') {
+    if (typeof b.state !== 'string' || !STATE_RE.test(b.state) || typeof b.verifier !== 'string' || !PKCE_RE.test(b.verifier)) return err(400, 'bad_request');
+    const hash = await sha256hex(b.state);
+    await db.prepare('DELETE FROM mail_handoff WHERE created < ?').bind(now - HANDOFF_TTL).run();
+    const row = await db.prepare('SELECT code, error, created FROM mail_handoff WHERE state_hash = ? AND username = ?').bind(hash, username).first();
+    if (!row) return json({ status: 'expired' });
+    if (row.error) { await db.prepare('DELETE FROM mail_handoff WHERE state_hash = ?').bind(hash).run(); return json({ status: row.error === 'other_browser' ? 'other_browser' : 'exited' }); }
+    if (!row.code) return json({ status: 'pending' });
+    // The code works once: take it out before using it.
+    const del = await db.prepare('DELETE FROM mail_handoff WHERE state_hash = ? AND code IS NOT NULL').bind(hash).run();
+    if (del.meta?.changes !== 1) return json({ status: 'pending' });
+    const t = await google(env, 'token', {
+      code: row.code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: `${url.origin}/api/v1/mail/callback`, grant_type: 'authorization_code', code_verifier: b.verifier,
+    });
+    if (!String(t.scope || '').split(' ').includes(GMAIL_SCOPE)) {
+      // Google lets people untick the Gmail box; without it there's nothing to read.
+      if (t.refresh_token || t.access_token) await google(env, 'revoke', { token: t.refresh_token || t.access_token }).catch(() => {});
+      return json({ status: 'no_scope' });
+    }
+    if (!t.refresh_token) return err(502, 'mail_error', { google: 'no_refresh_token' });
+    return json({ status: 'done', refreshToken: t.refresh_token, accessToken: t.access_token, expiresIn: t.expires_in || 3600 });
+  }
+  if (action === 'token') {
+    if (typeof b.refreshToken !== 'string' || !REFRESH_RE.test(b.refreshToken)) return err(400, 'bad_request');
+    const t = await google(env, 'token', { refresh_token: b.refreshToken, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, grant_type: 'refresh_token' });
+    return json({ accessToken: t.access_token, expiresIn: t.expires_in || 3600 });
+  }
+  if (action === 'remove') {
+    if (typeof b.refreshToken !== 'string' || !REFRESH_RE.test(b.refreshToken)) return err(400, 'bad_request');
+    await google(env, 'revoke', { token: b.refreshToken }).catch(() => {});
+    return json(null, 204);
+  }
+  return err(404, 'not_found');
+}
+
 export async function handleApi(req, env, url) {
   const db = env.DB;
   const path = url.pathname.replace(/\/+$/, '');
-  if (path === '/api/v1/status' && req.method === 'GET') return json({ configured: !!(db && env.INVITE_CODE), bank: !!(db && env.INVITE_CODE) && bankOn(env) });
+  const on = !!(db && env.INVITE_CODE);
+  if (path === '/api/v1/status' && req.method === 'GET') return json({ configured: on, bank: on && bankOn(env), mail: on && mailOn(env) });
+  if (path === '/api/v1/mail/callback' && req.method === 'GET') return mailCallback(req, env, url);
   if (!db || !env.INVITE_CODE) return err(503, 'not_configured');
   await ensureSchema(db);
 
@@ -289,7 +423,7 @@ export async function handleApi(req, env, url) {
     return json({ username, rev: b.envelope.rev }, 201);
   }
 
-  const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery|\/bank\/(?:link|finish|sync|remove))?$/.exec(path);
+  const m = /^\/api\/v1\/accounts\/([^/]+)(\/kdf|\/vault|\/recovery|\/bank\/(?:link|finish|sync|remove)|\/mail\/(?:link|finish|token|remove))?$/.exec(path);
   if (!m) return err(404, 'not_found');
   let username;
   try { username = decodeURIComponent(m[1]).toLowerCase(); } catch { return err(400, 'bad_username'); }
@@ -311,6 +445,7 @@ export async function handleApi(req, env, url) {
 
   if (sub === '/vault' && req.method === 'GET') return json({ envelope: JSON.parse(row.envelope), rev: row.rev });
   if (sub.startsWith('/bank/') && req.method === 'POST') return bankRoute(sub.slice(6), req, env, url, username);
+  if (sub.startsWith('/mail/') && req.method === 'POST') return mailRoute(sub.slice(6), req, env, url, username);
 
   if (sub === '/vault' && req.method === 'PUT') {
     const b = await body(req);
@@ -356,6 +491,7 @@ export async function handleApi(req, env, url) {
       db.prepare('DELETE FROM accounts WHERE username = ?').bind(username),
       db.prepare("DELETE FROM failures WHERE username LIKE ? ESCAPE '\\'").bind(`${username.replace(/[%_\\]/g, '\\$&')}|%`),
       db.prepare('DELETE FROM recovery WHERE username = ?').bind(username),
+      db.prepare('DELETE FROM mail_handoff WHERE username = ?').bind(username),
     ]);
     return json(null, 204);
   }
