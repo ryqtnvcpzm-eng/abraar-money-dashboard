@@ -109,13 +109,15 @@ function describe(name, charges, cad, end) {
 }
 
 /** Everything that repeats on a schedule: [{ name, cat, cadence, amount, monthly, next, active, change, kind, ids }]. */
+const DAY_TO_DAY = new Set(['cash', 'coffee', 'dining', 'groceries']);
 export function recurring(model) {
   return memo(model, 'recurring', () => {
     const end = dataEnd(model);
     if (!end) return [];
     const byName = new Map();
     for (const t of model.txns) {
-      if (!spent(t) || t.partOf || t.cat.id === 'cash') continue;
+      // Everyday places (a coffee, groceries, a ride) aren't bills even when the same amount comes round.
+      if (!spent(t) || t.partOf || DAY_TO_DAY.has(t.cat.id)) continue;
       if (!byName.has(t.name)) byName.set(t.name, []);
       byName.get(t.name).push(t);
     }

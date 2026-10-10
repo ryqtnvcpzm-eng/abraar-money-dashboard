@@ -46,11 +46,11 @@ export function openSettings() {
 
       <div class="list-head"><span>Data</span></div>
       <div class="list">
-        ${row('plus', 'blue', 'Add Statement', { act: 'add' })}
+        ${row('envelope', 'indigo', 'Bank Emails', { sub: v.mail?.connected ? `Gmail connected${v.mail.pending?.length ? ` · ${v.mail.pending.length} to check` : ''}` : v.mail?.pending?.length ? `${v.mail.pending.length} to check` : 'Gmail, checked every hour', act: 'mail' })}
+        ${row('plus', 'blue', app.account && !app.demo ? 'Add Transactions' : 'Add Statement', { act: 'add' })}
         ${row('doc', 'indigo', 'Statements', { detail: String(app.model.statements.length), act: 'statements' })}
-        ${row('arrows', 'blue', 'Bank Sync', { sub: v.bank?.accessToken ? `${v.bank.institution || 'Connected'}${v.bank.problem ? ' · needs you to sign in again' : ''}` : 'Pull new transactions from your bank', act: 'bank' })}
-        ${row('envelope', 'indigo', 'Bank Emails', { sub: v.mail?.connected ? `Gmail connected${v.mail.pending?.length ? ` · ${v.mail.pending.length} to check` : ''}` : v.mail?.pending?.length ? `${v.mail.pending.length} to check` : 'Add purchases from your bank’s email alerts', act: 'mail' })}
-        ${row('box', 'orange', 'Amazon Orders', { sub: 'Sort Amazon charges by what you bought', act: 'amazon' })}
+        ${row('arrows', 'blue', 'Bank Sync', { sub: v.bank?.accessToken ? `${v.bank.institution || 'Connected'}${v.bank.problem ? ' · needs you to sign in again' : ''}` : 'Through Plaid', act: 'bank' })}
+        ${row('box', 'orange', 'Amazon Orders', { sub: 'What each Amazon charge bought', act: 'amazon' })}
         ${row('tag', 'orange', 'Merchant Rules', { detail: String((v.userRules || []).length), act: 'rules' })}
         ${row('rings', 'green', 'Budget', { sub: v.plan ? `${money(v.plan.takeHome, { cents: false })} take-home · save ${v.plan.savePct}%` : 'Set a monthly budget and savings goal', act: 'budget' })}
         ${row('share', 'gray', 'Export Transactions', { sub: 'A CSV file for Numbers, Excel or your accountant', act: 'csv' })}
@@ -194,6 +194,9 @@ function openGithub(onDone) {
 /** Reconciled / doesn't match / not checked (no balances in the file). */
 export const statusChip = (ok, badLabel = 'Doesn’t match') => (ok ? '<span class="chip ok">Reconciled</span>' : ok === false ? `<span class="chip bad">${badLabel}</span>` : '<span class="chip">Not checked</span>');
 
+/** Was this month built from bank emails (rather than the bank feed)? */
+const fromMail = (ym) => app.vault.transactions.some((t) => t.statement === ym && typeof t.ext === 'string' && t.ext.startsWith('mail:'));
+
 export function openStatements() {
   const sheet = openSheet({ title: 'Statements', size: 'full', body: '' });
   const draw = () => {
@@ -202,9 +205,9 @@ export function openStatements() {
       <div class="list" style="margin-top:6px">${list.map((s) => `
         <button class="row tap" data-st="${esc(s.id)}">
           <span class="main"><span class="title">${esc(monthLabel(s.id))}</span><span class="subtitle">${plural(s.count, 'transaction')}${s.closing != null ? ` · closes at ${money(s.closing)}` : ''}</span></span>
-          ${statusChip(s.reconciled, 'Check')}${icon('chev-r', 'chev')}
+          ${s.source === 'sync' ? `<span class="chip">${fromMail(s.id) ? 'Gmail' : 'Synced'}</span>` : statusChip(s.reconciled, 'Check')}${icon('chev-r', 'chev')}
         </button>`).join('')}</div>
-      <p class="list-foot">Each statement: opening + deposits − withdrawals = closing, and both totals match the bank’s summary to the cent. Files without balances (some CSV downloads) can’t be checked.</p>`
+      <p class="list-foot">Each statement file is checked: opening + deposits − withdrawals = closing, and both totals match the bank’s summary to the cent. Files without balances (some CSV downloads) can’t be checked. Months marked Gmail or Synced are built from bank emails or bank sync as they come in.</p>`
       : '<div class="empty"><h3>No statements</h3><p>Add a statement from your bank to get started.</p></div>');
   };
   draw();

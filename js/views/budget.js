@@ -85,7 +85,7 @@ function budgetBody(st) {
   st.idx = idx;
   const startsIn = daysBetween(today, plan.start);
   const sub = `<p class="list-foot" style="margin:0 4px 12px;text-align:center">${plan.employer ? `${esc(plan.employer)} · ` : ''}${startsIn > 0 ? `starts ${dateLabel(plan.start, 'long')}` : `since ${dateLabel(plan.start, 'long')}`}</p>`;
-  if (!ym) return sub + summaryPills(plan, t) + '<div class="card"><div class="empty"><h3>No data yet</h3><p>Add a statement to see your rings.</p></div></div>';
+  if (!ym) return sub + summaryPills(plan, t) + `<div class="card"><div class="empty"><h3>No data yet</h3><p>${app.account && !app.demo ? 'Connect Gmail or add a statement' : 'Add a statement'} to see your rings.</p></div></div>`;
 
   const pm = planMonth(m, ym);
   const before = ym < startYm;
@@ -121,9 +121,11 @@ function budgetBody(st) {
     <p class="note" style="margin:-6px 4px 14px">${verdict(pm, t, inProgress)}</p>
 
     <div class="stat-grid">
-      <div class="tile"><div class="k">Money in</div><div class="v">${m0(pm.income)}</div><div class="s">${before ? 'benefits & transfers' : 'paycheques & more'}</div></div>
+      <div class="tile"><div class="k">Money in</div><div class="v">${m0(pm.income)}</div><div class="s">${before ? 'transfers & more' : 'pay & more'}</div></div>
       <div class="tile"><div class="k">Spent</div><div class="v ${pm.spent > t.spend ? 'neg' : ''}">${m0(pm.spent)}</div><div class="s">of ${m0(t.spend)}</div></div>
-      <div class="tile"><div class="k">Saved</div><div class="v ${pm.saved >= t.save ? 'pos' : pm.saved < 0 ? 'neg' : ''}">${signed0(pm.saved)}</div><div class="s">goal ${m0(t.save)}</div></div>
+      ${!pm.complete && pm.income <= 0
+        ? `<div class="tile"><div class="k">Saved</div><div class="v">—</div><div class="s">once pay comes in</div></div>`
+        : `<div class="tile"><div class="k">Saved</div><div class="v ${pm.saved >= t.save ? 'pos' : pm.saved < 0 ? 'neg' : ''}">${signed0(pm.saved)}</div><div class="s">${!pm.complete ? 'so far · ' : ''}goal ${m0(t.save)}</div></div>`}
     </div>
 
     ${layoutOutdated(plan) ? `<div class="banner" style="--c:var(--blue)"><span class="ic">${icon('sparkle')}</span><span class="txt"><b>New budget layout</b><span>${esc(app.rules.planTemplate.lines.slice(0, 3).map((l) => l.name).join(' · '))} and ${app.rules.planTemplate.lines.length - 3} more, with savings first.</span></span><button class="btn small" data-act="apply-layout">Use It</button></div>` : ''}

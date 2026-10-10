@@ -9,7 +9,7 @@ const FILTERS = [['all', 'All'], ['out', 'Money Out'], ['in', 'Money In'], ['one
 const PAGE = 60; // days rendered per chunk
 
 const viewSeg = () => segmented('actView', [['list', 'List'], ['calendar', 'Calendar']], app.ui.actView || 'list', 'act-seg');
-const addBtn = () => `<button class="glass-btn wide tint" data-act="add" aria-label="Add statement">${icon('plus')}<span>Add</span></button>`;
+const addBtn = () => `<button class="glass-btn wide tint" data-act="add" aria-label="Add transactions">${icon('plus')}<span>Add</span></button>`;
 
 export function renderActivity(page) {
   if (app.ui.actView === 'calendar' && app.model.txns.length) { renderCalendar(page); return; }
@@ -63,7 +63,7 @@ export function renderActivity(page) {
     if (!entries.length) {
       const filterName = FILTERS.find(([k]) => k === app.ui.filter)?.[1];
       listEl.innerHTML = !app.model.txns.length
-        ? `<div class="card"><div class="empty"><div class="ic">${icon('activity')}</div><h3>No transactions yet</h3><p>Add a statement from your bank to fill this in.</p><button class="btn" data-act="add" style="max-width:260px">Add Statement</button></div></div>`
+        ? `<div class="card"><div class="empty"><div class="ic">${icon('activity')}</div><h3>No transactions yet</h3><p>${app.account && !app.demo ? 'Connect Gmail and each purchase your bank emails you about shows up here, or add a statement file.' : 'Add a statement from your bank to fill this in.'}</p><button class="btn" data-act="add" style="max-width:260px">${app.account && !app.demo ? 'Add Transactions' : 'Add Statement'}</button></div></div>`
         : app.ui.search
           ? `<div class="empty"><div class="ic">${icon('search')}</div><h3>No Results</h3><p>Nothing matches “${esc(app.ui.search)}”${app.ui.filter !== 'all' ? ` in ${esc(filterName)}` : ''}.</p></div>`
           : `<div class="empty"><div class="ic">${icon('activity')}</div><h3>Nothing here yet</h3><p>No ${esc(filterName.toLowerCase())} so far.</p></div>`;

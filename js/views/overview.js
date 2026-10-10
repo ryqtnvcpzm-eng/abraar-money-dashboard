@@ -45,32 +45,8 @@ export function renderOverview(page) {
     <div id="ov-insights"></div>
     ${comingUp(m)}
     <div class="section-head"><h2>Accounts</h2></div>
-    <div class="list">
-      ${!app.demo && (app.vault.mail?.connected || app.vault.mail?.pending?.length) ? `<button class="row with-icon tap" data-act="mail">
-        <span class="cat-icon sm" style="--c:var(--${app.vault.mail.problem ? 'orange' : 'indigo'})">${icon('envelope')}</span>
-        <span class="main"><span class="title">Bank Emails</span>
-        <span class="subtitle">${app.vault.mail.problem === 'login' ? 'Needs you to sign in to Gmail again' : app.vault.mail.pending?.length ? `${plural(app.vault.mail.pending.length, 'transaction')} to check` : app.vault.mail.lastCheck ? `Checked ${esc(new Date(app.vault.mail.lastCheck).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Gmail connected'}</span></span>
-        ${app.vault.mail.pending?.length ? `<span class="badge-count">${app.vault.mail.pending.length}</span>` : ''}${icon('chev-r', 'chev')}
-      </button>` : ''}
-      ${!app.demo && app.account ? `<button class="row with-icon tap" data-act="bank">
-        <span class="cat-icon sm" style="--c:var(--${app.vault.bank?.problem ? 'orange' : 'blue'})">${icon('arrows')}</span>
-        <span class="main"><span class="title">${app.vault.bank?.accessToken ? esc(app.vault.bank.institution || 'Bank Sync') : 'Connect Your Bank'}</span>
-        <span class="subtitle">${app.vault.bank?.accessToken ? (app.vault.bank.problem ? 'Needs you to sign in again' : app.vault.bank.lastSync ? `Synced ${esc(new Date(app.vault.bank.lastSync).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}` : 'Connected') : 'New transactions come in on their own'}</span></span>
-        ${icon('chev-r', 'chev')}
-      </button>` : ''}
-      <button class="row with-icon tap" data-act="statements">
-        <span class="cat-icon sm" style="--c:var(--${bad ? 'orange' : 'green'})">${icon(bad ? 'warn' : 'seal')}</span>
-        <span class="main"><span class="title">${plural(m.statements.length, 'statement')}</span>
-        <span class="subtitle">${bad ? `${bad} need attention` : unchecked === m.statements.length ? 'No balances in these files to check against' : unchecked ? `Reconciled · ${unchecked} without balances to check` : 'All reconciled to the bank’s balances'}</span></span>
-        ${icon('chev-r', 'chev')}
-      </button>
-      <button class="row with-icon tap" data-act="add">
-        <span class="cat-icon sm" style="--c:var(--blue)">${icon('doc')}</span>
-        <span class="main"><span class="title">Add Statement</span><span class="subtitle">PDF, CSV or OFX from any bank</span></span>
-        ${icon('chev-r', 'chev')}
-      </button>
-    </div>
-    <p class="list-foot">${bal.relative ? `Your files don’t include a balance, so this shows money in minus money out since ${dateLabel(daily[0].date, 'long')}.` : `Balance as of ${dateLabel(bal.date, 'long')}.`} Data is decrypted only on this device.</p>`;
+    <div class="list">${accountRows(m, bad, unchecked)}</div>
+    <p class="list-foot">${bal.relative ? `There’s no bank balance to start from yet, so this shows money in minus money out since ${dateLabel(daily[0].date, 'long')}.` : `Balance as of ${dateLabel(bal.date, 'long')}.`} Data is decrypted only on this device.</p>`;
 
   page.innerHTML = pageFrame({ title: 'Summary', sub, right, body });
   wire(page);
@@ -93,7 +69,10 @@ export function renderOverview(page) {
         const startBal = first.bal - m.txns.reduce((sum, t) => (t.date === first.date ? sum + t.c : sum), 0) / 100;
         const d = last.bal - startBal;
         const pctv = startBal ? (d / Math.abs(startBal)) * 100 : 0;
-        changeEl.innerHTML = `<span class="${d >= 0 ? 'pos' : 'neg'}">${d >= 0 ? '▲' : '▼'} ${money(Math.abs(d))} (${Math.abs(pctv).toFixed(1)}%)</span><span class="when">${rangeLabel(app.ui.range, first.date)}</span>`;
+        // With no bank balance (Gmail only), the number above already is the change: just say since when.
+        changeEl.innerHTML = bal.relative && Math.abs(last.bal - d) < 0.005
+          ? `<span class="when">${rangeLabel(app.ui.range, first.date)}</span>`
+          : `<span class="${d >= 0 ? 'pos' : 'neg'}">${d >= 0 ? '▲' : '▼'} ${money(Math.abs(d))}${startBal && !bal.relative ? ` (${Math.abs(pctv).toFixed(1)}%)` : ''}</span><span class="when">${rangeLabel(app.ui.range, first.date)}</span>`;
       }
     };
     setHeader(null);
@@ -115,7 +94,7 @@ export function renderOverview(page) {
   const cards = insights(m);
   const ins = page.querySelector('#ov-insights');
   if (cards.length) {
-    ins.innerHTML = `<div class="section-head"><h2>Highlights</h2>${cards.length > 3 ? '<button class="more link" data-act="all-insights">Show All</button>' : ''}</div>
+    ins.innerHTML = `<div class="section-head"><h2>Highlights</h2></div>
       <div class="insight-list">${cards.slice(0, 3).map((c, i) => insightCard(c, i)).join('')}</div>
       ${cards.length > 3 ? `<button class="list show-all" data-act="all-insights"><span class="row tap"><span class="main"><span class="title" style="color:var(--tint)">Show All ${cards.length} Highlights</span></span>${icon('chev-r', 'chev')}</span></button>` : ''}`;
     ins.addEventListener('click', async (e) => {
@@ -180,7 +159,18 @@ function thisMonth(m) {
 /** A finished month (statements cover whole months): everyday spending against the usual month. */
 function monthRecap(m, ym) {
   const full = fullMonths(m);
-  if (!full.includes(ym)) return '';
+  if (!full.includes(ym)) {
+    // A month still coming in, with nothing to compare it to yet (a new Gmail-only account, say).
+    const end = dataEnd(m);
+    if (!end || monthOf(end) !== ym) return '';
+    const soFar = rangeSpend(m, `${ym}-01`, end, 'everyday').total;
+    return `<div class="section-head"><h2>${esc(monthLabel(ym, 'month'))}</h2><button class="more link" data-act="budget">Set Budget</button></div>
+    <button class="card month-card simple" data-act="spending" data-ym="${ym}">
+      <span class="mc-k">Everyday spending so far</span>
+      <span class="mc-v num">${money(soFar / 100, { cents: false })}</span>
+      <span class="mc-foot">Through ${esc(dateLabel(end, 'short'))}. Next month this compares with your usual. Set a budget to see what’s left each day.</span>
+    </button>`;
+  }
   const total = (x) => rangeSpend(m, `${x}-01`, `${x}-${String(daysInMonth(x)).padStart(2, '0')}`, 'everyday').total;
   const before = full.filter((x) => x < ym).slice(-6);
   const cur = total(ym);
@@ -298,4 +288,31 @@ function wire(page) {
     if (act === 'spending') { const ym = e.target.closest('[data-ym]')?.dataset.ym; app.ui.spKind = 'month'; app.ui.spAnchor = ym ? `${ym}-01` : null; app.ui.spSel = null; app.ui.mode = 'everyday'; app.stale.add('spending'); app.selectTab('spending'); }
     if (act === 'all-insights') openAllInsights();
   };
+}
+
+const when = (d) => new Date(d).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+/** Where the money comes from: Gmail first (the way in with an account), then bank sync and statement files if used. */
+function accountRows(m, bad, unchecked) {
+  const v = app.vault;
+  const mail = v.mail || {};
+  const row = (act, color, ic, title, sub, extra = '') => `<button class="row with-icon tap" data-act="${act}">
+        <span class="cat-icon sm" style="--c:var(--${color})">${icon(ic)}</span>
+        <span class="main"><span class="title">${title}</span><span class="subtitle">${sub}</span></span>${extra}${icon('chev-r', 'chev')}</button>`;
+  const out = [];
+  if (app.account && !app.demo) {
+    const waiting = mail.pending?.length || 0;
+    out.push(row('mail', mail.problem ? 'orange' : 'indigo', 'envelope', mail.connected ? 'Gmail' : 'Connect Gmail',
+      mail.problem === 'login' ? 'Needs you to sign in again' : waiting ? `${plural(waiting, 'transaction')} to check` : mail.connected ? (mail.lastCheck ? `Checked ${esc(when(mail.lastCheck))}` : 'Connected · checked every hour') : 'Bank emails, checked every hour',
+      waiting ? `<span class="badge-count">${waiting}</span>` : ''));
+    if (v.bank?.accessToken) out.push(row('bank', v.bank.problem ? 'orange' : 'blue', 'arrows', esc(v.bank.institution || 'Bank Sync'),
+      v.bank.problem ? 'Needs you to sign in again' : v.bank.lastSync ? `Synced ${esc(when(v.bank.lastSync))}` : 'Connected'));
+  }
+  // Months made from synced or emailed transactions have no bank balances to check, so only files count here.
+  const files = m.statements.filter((s) => s.source !== 'sync');
+  bad = files.filter((s) => s.reconciled === false).length;
+  unchecked = files.filter((s) => s.reconciled == null).length;
+  if (files.length) out.push(row('statements', bad ? 'orange' : 'green', bad ? 'warn' : 'seal', plural(files.length, 'statement'),
+    bad ? `${bad} need attention` : unchecked >= files.length ? 'No balances in these files to check against' : unchecked ? `Reconciled · ${unchecked} without balances to check` : 'All reconciled to the bank’s balances'));
+  if (!app.account || app.demo) out.push(row('add', 'blue', 'doc', 'Add Statement', 'PDF, CSV or OFX from any bank'));
+  return out.join('');
 }

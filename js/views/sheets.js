@@ -78,7 +78,7 @@ export function openTxn(id, { onChange } = {}) {
         </label>` : ''}
         ${t.c < 0 && !t.netted ? `<button class="row with-icon tap" data-act="split">
           <span class="cat-icon sm" style="--c:var(--teal)">${icon('split')}</span>
-          <span class="main"><span class="title">${t.split ? 'Edit Split' : 'Split Across Categories'}</span>${t.split ? '' : '<span class="subtitle">Groceries and a phone case in one order? Divide it</span>'}</span>${icon('chev-r', 'chev')}
+          <span class="main"><span class="title">${t.split ? 'Edit Split' : 'Split Across Categories'}</span>${t.split ? '' : '<span class="subtitle">One charge, several categories</span>'}</span>${icon('chev-r', 'chev')}
         </button>` : ''}
         ${t.split ? `<button class="row with-icon tap" data-act="category">
           <span class="cat-icon sm" style="--c:var(--gray)">${icon('tag')}</span>
