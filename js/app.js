@@ -767,6 +767,7 @@ function lock(reason = '', { dropCopy = false } = {}) {
   if (dropCopy && app.account) { app.env = null; store.dropAccountEnv(app.account); }
   if (app.demo) { app.demo = false; showLock(); return; }
   showLock(reason);
+  if (app.updateReady) setTimeout(() => location.reload(), 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -877,20 +878,39 @@ document.addEventListener('visibilitychange', () => {
 // ---------------------------------------------------------------------------
 // Service worker (offline) — never caches anything but the app's own files
 // ---------------------------------------------------------------------------
+// An installed app (the Mac or iPhone Home Screen one) can stay open for days, so it looks for a new version
+// every half hour and whenever it comes back to the front. A new version applies when Money locks (straight
+// away if it's already on the lock screen), so you never have to quit it.
 function registerSW() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
   navigator.serviceWorker.register('sw.js').then((reg) => {
+    app.swReg = reg;
     reg.addEventListener('updatefound', () => {
       const w = reg.installing;
       w?.addEventListener('statechange', () => {
         if (w.state === 'installed' && navigator.serviceWorker.controller) {
           app.updateReady = true;
-          if (app.vault) toast('Update ready — it applies next launch', { icon: 'sparkle', color: 'blue' });
+          if (!app.vault) location.reload();
+          else toast('Update ready — it applies when Money locks', { icon: 'sparkle', color: 'blue' });
         }
       });
     });
+    const check = () => reg.update().catch(() => {});
+    setInterval(check, 30 * 60e3);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
   }).catch(() => {});
 }
+
+/** Settings → Check for Updates: look now, and if there's a new version, restart into it. */
+app.checkForUpdate = async () => {
+  const reg = app.swReg || await navigator.serviceWorker?.getRegistration?.();
+  if (!reg) return false;
+  await reg.update().catch(() => {});
+  // A new version, if there is one, takes a moment to download and install.
+  for (let i = 0; i < 24 && reg.installing && !app.updateReady; i++) await new Promise((r) => setTimeout(r, 250));
+  if (app.updateReady || reg.waiting) { location.reload(); return true; }
+  return false;
+};
 
 app.icon = icon;
 app.alert = alertSheet;
