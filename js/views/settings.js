@@ -74,9 +74,17 @@ export function openSettings() {
         <button class="row tap destructive" data-act="delete-account"><span class="main"><span class="title">Delete Account</span><span class="subtitle">Erases @${esc(app.account)} from the cloud</span></span></button>`
         : `<button class="row tap destructive" data-act="forget"><span class="main"><span class="title">Forget This Device</span><span class="subtitle">Removes the encrypted copy and token from this browser</span></span></button>`}
       </div>`}
+      <div class="list" style="margin-top:22px">${row('sparkle', 'gray', 'Check for Updates', { act: 'update', chev: false, sub: '<span id="app-version">Money</span>' })}</div>
       <p class="list-foot">${app.env ? `Vault revision ${app.env.rev} · saved ${esc(new Date(app.env.savedAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }))}<br>` : ''}AES-256-GCM · PBKDF2-SHA-256 × ${(app.env?.kdf?.iterations || crypto.KDF_ITERATIONS).toLocaleString('en-CA')}</p>`);
   };
   draw();
+  // Which version this is: the service worker's cache is named after it ("money-v1.15.3").
+  const showVersion = () => globalThis.caches?.keys().then((keys) => {
+    const v = keys.filter((k) => k.startsWith('money-v')).sort().pop();
+    const el = sheet.el.querySelector('#app-version');
+    if (el && v) el.textContent = `Money ${v.slice(7)}${app.updateReady ? ' · update ready' : ''}`;
+  }).catch(() => {});
+  showVersion();
   sheet.el.addEventListener('change', async (e) => {
     if (e.target.dataset.act !== 'bio') return;
     haptic();
@@ -92,6 +100,12 @@ export function openSettings() {
     haptic();
     if (app.demo && ['signout', 'delete-account', 'forget', 'push', 'sync', 'migrate', 'recovery', 'passphrase', 'bio'].includes(act)) { toast('Not available with sample data', { icon: 'sparkle', color: 'indigo' }); return; }
     if (act === 'push') { await saveToRepo(); draw(); }
+    if (act === 'update') {
+      const el = sheet.el.querySelector('#app-version');
+      if (el) el.textContent = 'Checking…';
+      if (!await app.checkForUpdate()) { toast('You’re on the latest version'); draw(); showVersion(); }
+      return;
+    }
     if (act === 'sync') { await app.syncNow(); draw(); }
     if (act === 'invite') openInvite();
     if (act === 'recovery') openRecovery(draw);

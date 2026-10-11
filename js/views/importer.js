@@ -113,7 +113,10 @@ export function openImporter({ welcome = false } = {}) {
         </div>
         <label class="btn" style="margin-top:8px">${icon('plus')} Choose Files<input type="file" accept="${ACCEPT}" multiple hidden id="imp-file"></label>
         <div class="list-head"><span>Other ways to add</span></div>
-        <div class="list">${otherRows}</div>`
+        <div class="list">
+        <button class="row with-icon tap" data-act="mail"><span class="cat-icon sm" style="--c:var(--indigo)">${icon('envelope')}</span>
+          <span class="main"><span class="title">Bank Emails</span><span class="subtitle">Paste alerts here; Gmail needs a Money account</span></span>${icon('chev-r', 'chev')}</button>
+        ${otherRows}</div>`
         : `<label class="btn secondary" style="margin-top:8px">${icon('plus')} Choose More Files<input type="file" accept="${ACCEPT}" multiple hidden id="imp-file"></label>`;
     sheet.setBody(`
       ${start}
