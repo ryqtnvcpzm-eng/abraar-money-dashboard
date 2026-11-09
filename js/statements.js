@@ -6,7 +6,7 @@
 // reconcile) goes through the general reader in generic-parser.js.
 // CSV / OFX / QFX / QIF exports can span several months, so they're split into one statement per month.
 import { pdfToPages } from './pdf-text.js';
-import { parseCibcStatement, reconcile } from './cibc-parser.js';
+import { parseCibcStatement, reconcile, isCibcCard, fixCibcCard } from './cibc-parser.js';
 import { parseGenericStatement } from './generic-parser.js';
 import { decodeText, sniff, parseCsv, parseOfx, parseQif } from './file-formats.js';
 import { daysInMonth } from './format.js';
@@ -60,6 +60,7 @@ function parsePdfPages(pages, options) {
     }
   }
   const gen = parseGenericStatement(pages, options);
+  if (gen.meta?.card && isCibcCard(text)) fixCibcCard(gen, pages.map((p) => p.map((i) => i.str).join(' ')).join('\n'));
   markUnverified(gen);
   if (cibc?.period && cibc.transactions.length) {
     // Both tried: keep whichever reconciles (the CIBC one when neither does — it knows the layout).

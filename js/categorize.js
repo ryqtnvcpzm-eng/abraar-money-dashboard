@@ -91,6 +91,8 @@ export function cleanName(description) {
     .replace(/\s*\([^)]*$/, '')
     .replace(/#\s?\w*/g, ' ')
     .replace(/\b(NO|STORE|MAGASIN|SUCC)\.?\s?\d+\b/g, ' ')
+    // Card statements end a charge abroad with the country's ISO code ("EMIRATES DUBAI ARE")
+    .replace(/(?<=\S)\s(?:ARE|USA|GBR|FRA|DEU|NLD|IRL|PRT|AUT|TUR|QAT|SAU|OMN|KWT|BHR|JOR|PAK|BGD|LKA|HKG|SGP|JPN|KOR|THA|MYS|IDN|PHL|VNM|NZL|MEX|BRA|CHL|EGY|ZAF|NGA)\s*$/, ' ')
     .replace(new RegExp(`\\b(${CITIES})\\b`, 'g'), ' ')
     .replace(new RegExp(`\\s(${PROVINCES})\\s*$`), ' ')
     .replace(new RegExp(`(?<=\\S)\\s(${WORLD_CITIES})\\s*$`), ' ')
@@ -297,7 +299,11 @@ export function matchRule(desc, compiled) {
     for (const r of compiled.merchantRules) if (r.re.test(desc)) { best = { r }; break; }
   }
   if (best) return best.r;
-  const word = lexMatch(btokens, boffsets, lex.keywords) || lexMatch(tokens, offsets, lex.keywords);
+  // "INTERNET BILL PAY" means paid online, not an internet bill: those words don't pick the category.
+  const ttokens = normText(desc.replace(/\bINTERNET\s+(?=BILL|BANKING|TRANSFER|TFR)/gi, '')).split(' ');
+  const toffsets = [];
+  for (let i = 0, at = 0; i < ttokens.length; i++) { toffsets.push(at); at += ttokens[i].length + 1; }
+  const word = lexMatch(btokens, boffsets, lex.keywords) || lexMatch(ttokens, toffsets, lex.keywords);
   if (word) return { category: word.category, in: IN_FOR[word.category], source: 'keyword' };
   if (/^(TST|TOAST)\s?\*/i.test(desc.replace(PREFIX_RE, ''))) return { category: 'dining', source: 'hint' };
   return compiled.weakRules.find((r) => r.re.test(desc)) || null;

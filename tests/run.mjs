@@ -701,6 +701,46 @@ try {
       assert.equal(reconcile(st).ok, true, reconcile(st).issues.join('; '));
     });
   }
+  const card = JSON.parse(execFileSync('python3', ['-I', new URL('./make_cibc_card.py', import.meta.url).pathname, dir], { encoding: 'utf8' }));
+  await test('CIBC credit card: categories and foreign-currency lines kept out of names; reconciles', async () => {
+    const r = await readStatementFile({ name: 'visa.pdf', bytes: new Uint8Array(readFileSync(join(dir, 'visa-2026-10.pdf'))) }, { pdfjs });
+    const st = r.statements[0];
+    assert.equal(reconcile(st).ok, true, reconcile(st).issues.join('; '));
+    assert.equal(st.closing, -card.total, 'what you owe is a negative balance');
+    const em = st.transactions.find((t) => /EMIRATES 17/.test(t.description));
+    assert.equal(em.amount, -1512.34, 'the Canadian-dollar amount, not the dirhams');
+    assert.equal(em.memo, '3,920.00 AED');
+    assert.ok(!st.transactions.some((t) => /Grocery|Transportation|FOREIGN|AED|@/.test(t.description)), st.transactions.map((t) => t.description).join(' | '));
+    assert.equal(st.transactions.filter((t) => t.amount > 0).length, 2, 'the payment and the refund come in');
+    const v = emptyVault();
+    commitImport(v, prepareImport(v, st, compiled));
+    const m = buildModel(v, compiled);
+    const cat = (re) => m.txns.find((t) => re.test(t.name))?.cat.id;
+    assert.equal(cat(/^Emirates$/), 'travel');
+    assert.equal(cat(/^Amazon$/), 'shopping', 'not groceries because CIBC said Retail and Grocery');
+    assert.equal(cat(/^Payment Thank You/), 'own', 'paying the card isn’t income');
+  });
+  await test('a credit card statement sits beside the chequing one for the same month (both count)', async () => {
+    const r = await readStatementFile({ name: 'visa.pdf', bytes: new Uint8Array(readFileSync(join(dir, 'visa-2026-10.pdf'))) }, { pdfjs });
+    const v = emptyVault();
+    // October chequing: pays the card, nothing else.
+    const chq = { period: { start: '2026-10-01', end: '2026-10-31' }, opening: 1000, closing: 550, summaryTotals: { withdrawals: 450, deposits: 0 },
+      transactions: [{ date: '2026-10-02', description: 'INTERNET BILL PAY CIBC VISA', amount: -450 }], meta: { parser: 'cibc' } };
+    commitImport(v, prepareImport(v, chq, compiled));
+    const prep = prepareImport(v, r.statements[0], compiled);
+    assert.equal(prep.id, '2026-10:card');
+    commitImport(v, prep);
+    assert.deepEqual(v.statements.map((s) => s.id).sort(), ['2026-10', '2026-10:card']);
+    const m = buildModel(v, compiled);
+    assert.ok(m.txns.some((t) => t.name === 'Emirates' && t.amount === -1512.34), 'the card’s charges are there');
+    assert.equal(m.txns.find((t) => t.statement === '2026-10' && t.amount === -450)?.cat.id, 'own', 'paying the Visa from chequing is a transfer, not an internet bill');
+    assert.equal(dailyBalance(m).at(-1).bal, 55000, 'the balance line is the chequing account’s');
+    const f = flow(m, '2026-09-01', '2026-10-31');
+    assert.equal(f.out, toCents(1857.77), 'money out is what was spent, not the card payment on top');
+    // Re-adding the chequing statement leaves the card alone.
+    commitImport(v, prepareImport(v, chq, compiled));
+    assert.ok(buildModel(v, compiled).txns.some((t) => t.name === 'Emirates'));
+  });
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

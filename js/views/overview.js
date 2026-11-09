@@ -2,7 +2,7 @@
 // highlights from your data, bills coming up, and your statements and bank.
 import { app } from '../state.js';
 import { money, dateLabel, esc, fromCents, addDays, plural, monthLabel, iso, daysInMonth, monthOf } from '../format.js';
-import { dailyBalance, flow, insights, currentBalance, planMonth, planTargets } from '../ledger.js';
+import { dailyBalance, flow, insights, currentBalance, planMonth, planTargets, statementLabel } from '../ledger.js';
 import { upcoming, pace, dataEnd, fullMonths } from '../analysis.js';
 import { rangeSpend } from '../period.js';
 import { uncategorized } from './teach.js';
@@ -174,14 +174,20 @@ function monthRecap(m, ym) {
   const total = (x) => rangeSpend(m, `${x}-01`, `${x}-${String(daysInMonth(x)).padStart(2, '0')}`, 'everyday').total;
   const before = full.filter((x) => x < ym).slice(-6);
   const cur = total(ym);
+  // Everything that went out, so a month with a flight or tuition doesn't look small; the comparison stays on
+  // everyday spending, which is what's steady month to month.
+  const all = rangeSpend(m, `${ym}-01`, `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}`, 'everything');
+  const extra = all.total - cur;
+  const bigNames = all.rows.filter((r) => !r.cat.everyday).slice(0, 2).map((r) => r.cat.name.toLowerCase()).join(' and ');
   const usual = before.length ? before.reduce((s, x) => s + total(x), 0) / before.length : null;
   const top = Math.max(cur, usual || 0, 1);
   const d = usual != null ? cur - usual : null;
   const m0 = (c) => money(c / 100, { cents: false });
   return `<div class="section-head"><h2>${esc(monthLabel(ym, 'month'))}</h2><button class="more link" data-act="budget">Set Budget</button></div>
     <button class="card month-card simple" data-act="spending" data-ym="${ym}">
-      <span class="mc-k">Everyday spending</span>
-      <span class="mc-v num">${m0(cur)}</span>
+      <span class="mc-k">${extra >= 100 ? 'Spent' : 'Everyday spending'}</span>
+      <span class="mc-v num">${m0(extra >= 100 ? all.total : cur)}</span>
+      ${extra >= 100 ? `<span class="mc-k" style="margin-top:2px">${m0(cur)} everyday · ${m0(extra)} ${esc(bigNames || 'one-offs')}</span>` : ''}
       ${usual != null ? `<span class="mc-bars">
         <span class="mc-bar"><i style="--c:var(--${d > usual * 0.1 ? 'orange' : 'blue'});width:${(cur / top) * 100}%"></i><em>${esc(monthLabel(ym, 'month'))}</em></span>
         <span class="mc-bar"><i style="--c:var(--gray);width:${(usual / top) * 100}%"></i><em>Usual month</em></span>
@@ -231,7 +237,7 @@ function banners() {
   }
   const bad = app.model.statements.filter((s) => s.reconciled === false);
   if (bad.length) {
-    out += `<button class="banner" style="--c:var(--red);width:100%;text-align:left" data-act="statements"><span class="ic">${icon('warn')}</span><span class="txt"><b>${bad.length === 1 ? `${monthLabel(bad[0].id)} doesn’t reconcile` : `${bad.length} statements don’t reconcile`}</b><span>Tap to see what’s off.</span></span>${icon('chev-r', 'chev')}</button>`;
+    out += `<button class="banner" style="--c:var(--red);width:100%;text-align:left" data-act="statements"><span class="ic">${icon('warn')}</span><span class="txt"><b>${bad.length === 1 ? `${statementLabel(bad[0])} doesn’t reconcile` : `${bad.length} statements don’t reconcile`}</b><span>Tap to see what’s off.</span></span>${icon('chev-r', 'chev')}</button>`;
   }
   return out;
 }
