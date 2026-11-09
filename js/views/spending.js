@@ -25,6 +25,9 @@ export function renderSpending(page) {
   const mode = app.ui.mode;
   const first = periodFor(kind, span[0]);
   const last = periodFor(kind, span[1]);
+  // A statement (or email) that brings a newer month moves you to it, if you were on the latest one before.
+  if (app.ui.spAnchor && app.ui.spSpanEnd && app.ui.spSpanEnd < span[1] && periodFor(kind, app.ui.spAnchor).key === periodFor(kind, app.ui.spSpanEnd).key) app.ui.spAnchor = null;
+  app.ui.spSpanEnd = span[1];
   let p = periodFor(kind, app.ui.spAnchor || span[1]);
   if (p.from < first.from) p = first;
   if (p.from > last.from) p = last;
@@ -62,7 +65,9 @@ export function renderSpending(page) {
       <button class="arrow" data-step="1" aria-label="Next ${kind}" ${canNext ? '' : 'disabled'}>${icon('chev-r')}</button>
     </div>
     <section class="card sp-hero" id="sp-card">
-      <div class="sp-k">${isNow || ongoing ? 'Spent so far' : 'Spent'}${ongoing ? ` · through ${esc(dateLabel(span[1], 'short'))}` : ''}</div>
+      <div class="sp-k">${ongoing && today > p.to
+        ? `Spent through ${esc(dateLabel(span[1], 'short'))} · later days not added yet`
+        : `${isNow || ongoing ? 'Spent so far' : 'Spent'}${ongoing ? ` · through ${esc(dateLabel(span[1], 'short'))}` : ''}`}</div>
       <div class="sp-total num">${money(fromCents(total))}</div>
       ${compare}
       <div class="chart-wrap sp-chart" id="sp-chart"></div>
