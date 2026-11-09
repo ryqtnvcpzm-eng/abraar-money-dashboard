@@ -391,6 +391,9 @@ export function cumulativeChart(wrap, { cur, prev = [], budget = null, color = '
   const ih = H - pad.t - pad.b;
   // The days of this month set the axis; last month is drawn for as many of its days as fit.
   const n = Math.max(cur.length, 2);
+  // A finished month is compared with all of last month (as the total above it is), not its first n days.
+  const prevAll = prev.length ? prev[prev.length - 1] : null;
+  const done = cur.length > 0 && cur.every((x) => x != null);
   prev = prev.slice(0, n);
   const curVals = cur.filter((v) => v != null);
   const maxV = Math.max(1, ...curVals, ...prev, budget || 0) / 100;
@@ -433,17 +436,17 @@ export function cumulativeChart(wrap, { cur, prev = [], budget = null, color = '
     if (i == null) {
       scrub.style.opacity = 0;
       k.textContent = lastI >= 0 ? dayLabel(lastI) : '';
-      v.innerHTML = lastI >= 0 ? `${money((cur[lastI] || 0) / 100)}${prev.length ? ` <small>· ${esc(prevLabel)} by then ${money((prev[Math.min(lastI, prev.length - 1)] || 0) / 100)}</small>` : ''}` : '';
+      v.innerHTML = lastI >= 0 ? `${money((cur[lastI] || 0) / 100)}${prev.length ? ` <small>· ${done ? `all of ${esc(prevLabel)} ${money((prevAll || 0) / 100)}` : `${esc(prevLabel)} by then ${money((prev[Math.min(lastI, prev.length - 1)] || 0) / 100)}`}</small>` : ''}` : '';
       return;
     }
-    const c = cur[i], p = prev[Math.min(i, prev.length - 1)];
+    const c = cur[i], p = done && i === cur.length - 1 ? prevAll : prev[Math.min(i, prev.length - 1)];
     scrub.style.opacity = 1;
     scrub.querySelector('.cs-l').setAttribute('x1', X(i)); scrub.querySelector('.cs-l').setAttribute('x2', X(i));
     const cc = scrub.querySelector('.cs-c'), pc = scrub.querySelector('.cs-p');
     cc.style.display = c == null ? 'none' : ''; if (c != null) { cc.setAttribute('cx', X(i)); cc.setAttribute('cy', Y(c)); }
     pc.style.display = p == null || !prev.length ? 'none' : ''; if (p != null) { pc.setAttribute('cx', X(i)); pc.setAttribute('cy', Y(p)); }
     k.textContent = dayLabel(i);
-    v.innerHTML = `${c != null ? money(c / 100) : '—'}${prev.length && p != null ? ` <small>· ${esc(prevLabel)} ${money(p / 100)}</small>` : ''}`;
+    v.innerHTML = `${c != null ? money(c / 100) : '—'}${prev.length && p != null ? ` <small>· ${done && i === cur.length - 1 ? 'all of ' : ''}${esc(prevLabel)} ${money(p / 100)}</small>` : ''}`;
   };
   show(null);
   const at = (clientX) => {
