@@ -237,7 +237,12 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
   const iw = W - pad.l - pad.r;
   const ih = H - pad.t - pad.b;
   // Supports negative values (e.g. a month that saved less than nothing): the baseline sits at 0.
-  const maxV = Math.max(1e-9, ...bars.map((b) => b.v), ref ? ref.v : 0);
+  // One month far above the rest (tuition, a flight) would flatten every other bar. Such a bar is drawn up to
+  // just above the next highest, with a break and its real amount on top, so the usual months stay readable.
+  const sortedV = bars.map((b) => b.v).filter((v) => v > 0).sort((a, b) => b - a);
+  const capV = sortedV.length > 2 && sortedV[0] > sortedV[1] * 2.5 ? sortedV[1] * 1.4 : null;
+  const shown = (v) => (capV != null && v > capV ? capV : v);
+  const maxV = Math.max(1e-9, ...bars.map((b) => shown(b.v)), ref ? shown(ref.v) : 0);
   const minV = Math.min(0, ...bars.map((b) => b.v));
   const step = niceStep(maxV - minV, 3);
   const top = Math.ceil((maxV * 1.08) / step) * step || step;
@@ -259,9 +264,28 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
     const cx = pad.l + band * i + band / 2;
     const x = cx - bw / 2;
     const y0 = Y(0);
-    const h = b.v === 0 ? 0 : Math.max(2, Math.abs(Y(b.v) - y0));
+    const h = b.v === 0 ? 0 : Math.max(2, Math.abs(Y(shown(b.v)) - y0));
+    const broken = capV != null && b.v > capV;
+    const brk = broken ? `<path d="M${x - 1},${Y(capV * 0.78) + 3}L${x + bw + 1},${Y(capV * 0.78) - 3}" style="stroke:var(--card, var(--bg-2));stroke-width:3"/>
+      <text class="chart-axis" x="${cx}" y="${Y(capV) - 4}" text-anchor="middle" style="font-weight:600;fill:var(--label-2)">${esc(format(b.v))}</text>` : '';
     const r = Math.min(4, h, bw / 2);
     let path = '';
+    if (h && b.v > 0 && b.stack?.length > 1) {
+      // Stacked: each part sits on the one below; only the top one gets rounded corners.
+      let base = 0;
+      const k = shown(b.v) / b.v;
+      const parts = b.stack.filter((s) => s.v > 0).map((s) => ({ ...s, v: s.v * k }));
+      return `<g class="cc-bar" data-i="${i}">
+      <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 34}" fill="transparent"/>
+      ${parts.map((s, j) => {
+        const yb = Y(base), yt = Y(base + s.v);
+        base += s.v;
+        const top = j === parts.length - 1, rr = Math.min(4, yb - yt, bw / 2);
+        const d = top ? `M${x},${yb}V${yt + rr}Q${x},${yt} ${x + rr},${yt}H${x + bw - rr}Q${x + bw},${yt} ${x + bw},${yt + rr}V${yb}Z` : `M${x},${yb}V${yt}H${x + bw}V${yb}Z`;
+        return `<path d="${d}" style="fill:var(--${s.color});transition:opacity 180ms"/>`;
+      }).join('')}${brk}
+      <text class="chart-axis cc-x" x="${cx}" y="${H - 6}" text-anchor="middle">${(bars.length - 1 - i) % Math.max(thin ? 2 : 1, Math.ceil(26 / band)) === 0 || i === def ? esc(b.label) : ''}</text></g>`;
+    }
     if (h && b.v > 0) { const y = y0 - h; path = `M${x},${y0}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${y0}Z`; }
     if (h && b.v < 0) { const y = y0 + h; path = `M${x},${y0}V${y - r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y - r}V${y0}Z`; }
     // Labels need ~26px each: every Nth one, counted back from the latest, plus the highlighted bar.
@@ -269,10 +293,10 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
     const showLabel = (bars.length - 1 - i) % every === 0 || i === def;
     return `<g class="cc-bar" data-i="${i}">
       <rect x="${pad.l + band * i}" y="${pad.t - 12}" width="${band}" height="${ih + 34}" fill="transparent"/>
-      ${path ? `<path d="${path}" style="fill:var(--${b.color || color});transition:opacity 180ms"/>` : ''}
+      ${path ? `<path d="${path}" style="fill:var(--${b.color || color});transition:opacity 180ms"/>` : ''}${brk}
       <text class="chart-axis cc-x" x="${cx}" y="${H - 6}" text-anchor="middle">${showLabel ? esc(b.label) : ''}</text></g>`;
   }).join('');
-  const refLine = ref ? `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(ref.v)}" y2="${Y(ref.v)}" style="stroke:var(--label)" stroke-opacity=".55" stroke-width="1.5"/>
+  const refLine = ref && (capV == null || ref.v <= capV) ? `<line x1="${pad.l}" x2="${W - pad.r + 6}" y1="${Y(ref.v)}" y2="${Y(ref.v)}" style="stroke:var(--label)" stroke-opacity=".55" stroke-width="1.5"/>
     <text class="chart-axis" x="${pad.l + 2}" y="${Y(ref.v) - 5}" style="fill:var(--label-2);font-weight:600;paint-order:stroke;stroke:var(--sheet-row, var(--bg-2));stroke-width:4px;stroke-linejoin:round">${esc(ref.label)} ${esc(refFmt(ref.v))}</text>` : '';
   wrap.innerHTML = `<div class="chart-readout"><span class="k"></span><b class="v"></b></div>
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(bars.map((b) => `${b.title}: ${exact(b.v)}`).join(', '))}">${grid}${cols}${refLine}</svg>`;
@@ -286,13 +310,12 @@ export function columnChart(wrap, bars, { color = 'blue', highlight = null, ref 
     if (active !== -2 && i >= 0) haptic();
     active = i;
     groups.forEach((g, j) => {
-      const p = g.querySelector('path');
-      if (p) p.style.opacity = i < 0 ? 1 : j === i ? 1 : 0.35;
+      g.querySelectorAll('path').forEach((p) => { p.style.opacity = i < 0 ? 1 : j === i ? 1 : 0.35; });
       const t = g.querySelector('.cc-x');
       t.style.fill = j === i ? 'var(--label)' : '';
       t.style.fontWeight = j === i ? '600' : '';
     });
-    if (i >= 0) { k.textContent = bars[i].title; v.textContent = exact(bars[i].v); }
+    if (i >= 0) { k.textContent = bars[i].title; v.innerHTML = `${esc(exact(bars[i].v))}${bars[i].note ? ` <small>${esc(bars[i].note)}</small>` : ''}`; }
     else if (ref) { k.textContent = ref.label; v.textContent = refFmt(ref.v); }
     else { k.textContent = ''; v.textContent = ''; }
   };

@@ -361,3 +361,57 @@ export function reconcile(st) {
   if (ok && unverified) ok = null;
   return { ok, checks, issues, totals: { withdrawals: wd / 100, deposits: dep / 100 } };
 }
+
+// ---------------------------------------------------------------------------
+// CIBC credit cards (Visa, Mastercard). The general reader finds the rows; this tidies what only knowing
+// CIBC's layout can: the spend category CIBC prints beside each charge (it ended up in the name, so
+// "Retail and Grocery" made an Amazon order look like groceries), the foreign-currency line under a
+// charge abroad ("3,920.00 AED @ 0.385801"), and the account summary that lets the statement reconcile.
+// ---------------------------------------------------------------------------
+
+/** CIBC's spend categories → the bank-feed category words Money's categorizer understands (used only when Money doesn't know the place). */
+const CIBC_SPEND = [
+  ['Hotel, Entertainment and Recreation', 'ENTERTAINMENT'], ['Professional and Financial Services', 'GENERAL_SERVICES'],
+  ['Personal and Household Expenses', 'GENERAL_MERCHANDISE'], ['Home and Office Improvement', 'HOME_IMPROVEMENT'],
+  ['Foreign Currency Transactions', null], ['Retail and Grocery', 'GENERAL_MERCHANDISE'], ['Health and Education', 'MEDICAL'],
+  ['Other Transactions', null], ['Transportation', 'TRANSPORTATION'], ['Restaurants', 'FOOD_AND_DRINK'],
+];
+const FX_RE = /\s*(?:FOREIGN CURRENCY\b[^\d]*)?(?:([\d,]+\.\d{2})\s?([A-Z]{3})|([A-Z]{3})\s?([\d,]+\.\d{2}))\s*(?:@|EXCHANGE RATE\b[\s:-]*)\s*[\d.]+/i;
+
+export const isCibcCard = (text) => /\bCIBC\b/.test(text) && /(previous balance|total balance|new balance)/i.test(text) && /(credit limit|payment due|minimum payment)/i.test(text);
+
+/** Tidy a CIBC credit card statement read by the general reader (mutates it). */
+export function fixCibcCard(st, text) {
+  for (const t of st.transactions) {
+    let d = t.description;
+    const fx = FX_RE.exec(d);
+    if (fx) {
+      t.memo = `${fx[1] || fx[4]} ${fx[2] || fx[3]}`.toUpperCase();
+      d = (d.slice(0, fx.index) + ' ' + d.slice(fx.index + fx[0].length)).replace(/\s*FOREIGN CURRENCY\b/i, '');
+    }
+    d = d.replace(/\s+/g, ' ').trim();
+    for (const [label, hint] of CIBC_SPEND) {
+      const re = new RegExp(`\\s+${label.replace(/[,]/g, ',?')}\\s*$`, 'i');
+      if (re.test(d)) { d = d.replace(re, ''); if (hint) t.hint = hint; break; }
+    }
+    // Paying the card is money moving between your own accounts, not income.
+    if (t.amount > 0 && /\bPAYMENT\b.*\b(THANK YOU|MERCI|RECEIVED)\b|\bPAIEMENT\b/i.test(d)) t.hint = 'LOAN_PAYMENTS_CREDIT_CARD';
+    t.description = d.trim();
+  }
+  // The summary: what you owed before, what you owe now, and what came in between.
+  const flat = String(text).replace(/\s+/g, ' ');
+  const amt = (re) => { const m = re.exec(flat); if (!m) return null; const v = parseAmount(m[1]); return Number.isFinite(v) ? (/CR/i.test(m[2] || '') ? -v : v) : null; };
+  const prev = amt(/Previous (?:statement )?balance\s*\$?\s*([\d,]+\.\d{2})(\s?CR)?/i);
+  const total = amt(/(?:Total|New) balance\s*=?\s*\$?\s*([\d,]+\.\d{2})(\s?CR)?/i);
+  const paid = amt(/\bPayments\s*[-−–]\s*\$?\s*([\d,]+\.\d{2})()/i) ?? 0;
+  const credits = amt(/Other credits\s*[-−–]\s*\$?\s*([\d,]+\.\d{2})()/i) ?? 0;
+  if (prev != null && total != null) {
+    // Money's convention for cards: what you owe is a negative balance.
+    st.opening = -prev;
+    st.closing = -total;
+    const deposits = round2(paid + credits);
+    st.summaryTotals = { withdrawals: round2(total - prev + deposits), deposits };
+  }
+  st.meta = { ...st.meta, bank: 'CIBC', cibcCard: true };
+  return st;
+}

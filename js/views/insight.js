@@ -2,7 +2,7 @@
 // a chart with the month in question highlighted, three key numbers, and the data to drill into.
 import { app } from '../state.js';
 import { money, monthLabel, dateLabel, esc, fromCents, plural, daysInMonth } from '../format.js';
-import { monthlySpend, spendByCategory, monthTxns, topMerchants, dailyBalance, planTargets, currentBalance } from '../ledger.js';
+import { monthlySpend, spendByCategory, monthTxns, topMerchants, dailyBalance, planTargets, currentBalance, statementLabel } from '../ledger.js';
 import { recurring, upcoming, pace as paceOf, unusual as unusualOf, weekdays, smallBuys, cashflow, fees as feesOf, amazon as amazonOf, dataEnd, AMAZON_RE } from '../analysis.js';
 import { icon, catIcon, openSheet, haptic, toast, closeAllSheets } from '../ui.js';
 import { columnChart, balanceChart } from '../charts.js';
@@ -167,7 +167,7 @@ function trend(card, ctx) {
     <div class="list">${rows.map(({ s, prev }) => {
       const base = prev?.closing ?? s.opening;
       const d = base != null ? s.closing - base : null;
-      return `<div class="row"><span class="main"><span class="title">${esc(monthLabel(s.id))}</span></span>
+      return `<div class="row"><span class="main"><span class="title">${esc(statementLabel(s))}</span></span>
         <span><span class="value">${money(s.closing)}</span>${d != null ? `<span class="value-sub ${d >= 0 ? 'pos' : 'neg'}">${money(d, { sign: true })}</span>` : ''}</span></div>`;
     }).join('')}</div>`;
     })()}`;

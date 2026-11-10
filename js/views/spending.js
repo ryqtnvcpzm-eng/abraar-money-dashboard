@@ -53,6 +53,21 @@ export function renderSpending(page) {
   const today = iso(new Date());
   const isNow = periodFor(kind, today).key === p.key;
 
+  // What the total is made of: everyday life, and the big or unusual things (travel, tuition, money sent to
+  // people, one-offs) that "Everyday spending" leaves out. So a month with a flight never looks too small.
+  const everydayTotal = spendByCategory(inRange(p.from, p.to), 'everyday').reduce((s, r) => s + r.cents, 0);
+  let split = '';
+  if (mode === 'everyday') {
+    const all = spendByCategory(inRange(p.from, p.to), 'everything').reduce((s, r) => s + r.cents, 0);
+    const left = all - everydayTotal;
+    if (left >= 100) split = `<button class="sp-split" data-act="all-spending"><span>Leaves out <b>${m0(left)}</b> of travel, tuition, money sent to people and one-offs.</span><span class="sp-split-go">Show everything</span></button>`;
+  } else {
+    const outside = rows.filter((r) => !r.cat.everyday);
+    const oneOffs = Math.max(0, total - everydayTotal - outside.reduce((s, r) => s + r.cents, 0));
+    const parts = [['Everyday', everydayTotal, 'blue'], ...outside.map((r) => [r.cat.name, r.cents, r.cat.color]), ...(oneOffs >= 100 ? [['One-offs', oneOffs, 'gray']] : [])].filter(([, c]) => c > 0);
+    if (parts.length > 1) split = `<div class="sp-split-row">${parts.slice(0, 5).map(([k, c, col]) => `<span class="sp-chip" style="--c:var(--${col})"><i></i>${esc(k)} <b>${m0(c)}</b></span>`).join('')}</div>`;
+  }
+
   const compare = delta == null ? ''
     : Math.abs(delta) < Math.max(500, prevTotal * 0.03) ? `<span class="sp-pill same">About the same as ${esc(prevName)}${ongoing ? ' by now' : ''}</span>`
     : `<span class="sp-pill ${delta > 0 ? 'up' : 'down'}">${icon(delta > 0 ? 'trendUp' : 'trendDown')}${m0(Math.abs(delta))} ${delta > 0 ? 'more' : 'less'} than ${esc(prevName)}${ongoing ? ' by now' : ''}</span>`;
@@ -65,11 +80,12 @@ export function renderSpending(page) {
       <button class="arrow" data-step="1" aria-label="Next ${kind}" ${canNext ? '' : 'disabled'}>${icon('chev-r')}</button>
     </div>
     <section class="card sp-hero" id="sp-card">
-      <div class="sp-k">${ongoing && today > p.to
+      <div class="sp-k">${mode === 'everyday' ? 'Everyday · ' : ''}${ongoing && today > p.to
         ? `Spent through ${esc(dateLabel(span[1], 'short'))} · later days not added yet`
         : `${isNow || ongoing ? 'Spent so far' : 'Spent'}${ongoing ? ` · through ${esc(dateLabel(span[1], 'short'))}` : ''}`}</div>
       <div class="sp-total num">${money(fromCents(total))}</div>
       ${compare}
+      ${split}
       <div class="chart-wrap sp-chart" id="sp-chart"></div>
       <button class="sp-filter" data-act="mode">${icon(mode === 'everyday' ? 'cart' : 'bag')}<span>${mode === 'everyday' ? 'Everyday spending' : 'All spending'}</span><b>Change</b></button>
     </section>
@@ -107,10 +123,23 @@ export function renderSpending(page) {
     const vals = months.map((ym) => (ym <= span[1].slice(0, 7) && ym >= span[0].slice(0, 7) ? rangeSpend(m, `${ym}-01`, `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}`, mode).total : 0));
     const filled = vals.filter((v, i) => months[i] <= span[1].slice(0, 7) && months[i] >= span[0].slice(0, 7));
     const avg = filled.length ? filled.reduce((a, b) => a + b, 0) / filled.length : 0;
-    columnChart(chartEl, months.map((ym, i) => ({ key: ym, label: monthLabel(ym, 'short').slice(0, 1), title: monthLabel(ym), v: fromCents(vals[i]) })), {
+    // With everything counted, each bar shows how much was everyday life and how much the big or unusual
+    // things (a flight, tuition, money sent to people), so a spike explains itself.
+    const inData = (ym) => ym <= span[1].slice(0, 7) && ym >= span[0].slice(0, 7);
+    const bars = months.map((ym, i) => {
+      const bar = { key: ym, label: monthLabel(ym, 'short').slice(0, 1), title: monthLabel(ym), v: fromCents(vals[i]) };
+      if (mode === 'everyday' || !inData(ym) || !vals[i]) return bar;
+      const to = `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}`;
+      const every = rangeSpend(m, `${ym}-01`, to, 'everyday').total;
+      const other = vals[i] - every;
+      if (other < 100) return bar;
+      const big = rangeSpend(m, `${ym}-01`, to, 'everything').rows.filter((r) => !r.cat.everyday).slice(0, 2).map((r) => r.cat.name.toLowerCase());
+      return { ...bar, stack: [{ v: fromCents(every), color: 'blue' }, { v: fromCents(other), color: 'orange' }], note: `${m0(every)} everyday · ${m0(other)} ${big.length ? big.join(', ') : 'other'}` };
+    });
+    columnChart(chartEl, bars, {
       color: 'blue', highlight: span[1].slice(0, 7) <= months[11] ? span[1].slice(0, 7) : null, ref: avg ? { v: fromCents(avg), label: 'Average' } : null, height: 180,
     });
-    chartEl.insertAdjacentHTML('beforeend', '<p class="sp-hint">Tap a month to open it.</p>');
+    chartEl.insertAdjacentHTML('beforeend', `<p class="sp-hint">${mode === 'everyday' ? '' : '<span class="sp-key"><i style="--c:var(--blue)"></i>Everyday</span><span class="sp-key"><i style="--c:var(--orange)"></i>Travel, tuition and other big things</span> · '}Tap a month to open it.</p>`);
     chartEl.querySelectorAll('.cc-bar').forEach((b) => b.addEventListener('click', () => {
       const ym = months[+b.dataset.i];
       if (ym > span[1].slice(0, 7) || ym < span[0].slice(0, 7)) return;
@@ -153,6 +182,7 @@ export function renderSpending(page) {
     }
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'mode') { haptic(); pickMode(page); return; }
+    if (act === 'all-spending') { haptic(); app.ui.mode = 'everything'; renderSpending(page); return; }
     if (act === 'more-cats') { haptic(); app.ui.spAllCats = !app.ui.spAllCats; renderSpending(page); return; }
     if (act === 'periods') { haptic(); pickPeriod(page, kind, first, last, mode); return; }
     if (act === 'all-places') { haptic(); allPlaces(p, name, mode); return; }

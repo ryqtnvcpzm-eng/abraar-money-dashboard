@@ -29,9 +29,28 @@ const dupKey = (t) => `${t.date}|${toCents(t.amount)}|${(t.merchant || '').toUpp
  * Turn a parsed statement into a candidate import: sanitized, categorized,
  * reconciled, and checked for duplicates against what the vault already has.
  */
+// Accounts. A vault follows one main account (the kind of its first statement: a bank account or a credit
+// card); statements from the other kind sit beside it under their own id ("2026-10:card"), so a Visa
+// statement and a chequing statement for the same month both count instead of one replacing the other.
+export const accountKind = (parsed) => (parsed.meta?.card ? 'card' : 'bank');
+export function mainKind(vault) {
+  if (vault.account?.kind) return vault.account.kind;
+  if (vault.account?.name === 'Credit Card') return 'card';
+  return vault.statements.some((s) => s.source !== 'sync') ? 'bank' : null;
+}
+export const isSecondary = (idOrStatement) => String(idOrStatement?.id ?? idOrStatement ?? '').includes(':');
+/** "October 2026", or "October 2026 · Credit card" for the second account. */
+export function statementLabel(s) {
+  const id = String(s?.id ?? s);
+  const kind = id.split(':')[1];
+  return `${monthLabel(id)}${kind ? ` · ${kind === 'card' ? 'Credit card' : 'Bank account'}` : ''}`;
+}
+
 export function prepareImport(vault, parsed, compiled) {
   const rec = reconcile(parsed);
-  const id = parsed.period ? parsed.period.end.slice(0, 7) : null;
+  const kind = accountKind(parsed);
+  const main = mainKind(vault) || kind;
+  const id = parsed.period ? `${parsed.period.end.slice(0, 7)}${kind === main ? '' : `:${kind}`}` : null;
   const existing = id ? vault.statements.find((s) => s.id === id) : null;
   const inPeriod = inside(parsed.period);
 
@@ -51,6 +70,9 @@ export function prepareImport(vault, parsed, compiled) {
     const merchant = sanitizeDescription(t.description);
     const base = { id: `${id}-${tag}-${String(i + 1).padStart(3, '0')}`, date: t.date, merchant, name: '', amount: Math.round(t.amount * 100) / 100, category: 'other', statement: id };
     if (t.balance != null) base.balance = t.balance;
+    // What the statement says about the charge beyond its name: the bank's category, the foreign amount.
+    if (t.hint) base.hint = t.hint;
+    if (t.memo) base.memo = t.memo;
     const k = dupKey(base);
     if (counts.get(k) > 0) { counts.set(k, counts.get(k) - 1); duplicates++; return; }
     Object.assign(base, categorize(base, compiled, vault.userRules, vault.account?.currency));
@@ -59,7 +81,7 @@ export function prepareImport(vault, parsed, compiled) {
 
   return {
     id,
-    label: id ? monthLabel(id) : 'Unknown period',
+    label: id ? statementLabel(id) : 'Unknown period',
     period: parsed.period,
     opening: parsed.opening,
     closing: parsed.closing,
@@ -81,6 +103,7 @@ export function commitImport(vault, prep) {
   if (!prep.id) throw new Error('Statement period unknown');
   // The first statement in a new vault sets the account's currency and kind.
   if (!vault.statements.length && vault.account) {
+    vault.account.kind = prep.meta?.card ? 'card' : 'bank';
     if (prep.meta?.currency) vault.account.currency = prep.meta.currency;
     if (prep.meta?.bank) vault.account.bank = prep.meta.bank;
     if (prep.meta?.card) vault.account.name = 'Credit Card';
@@ -90,7 +113,7 @@ export function commitImport(vault, prep) {
   const covered = inside(prep.period);
   // Synced and email-alert rows in those dates go too, whichever month they were filed under (a card
   // statement often runs mid-month to mid-month): the file is the record.
-  const replaced = (t) => covered(t) && (t.statement === prep.id || (!!t.ext && !!prep.period));
+  const replaced = (t) => covered(t) && (t.statement === prep.id || (!!t.ext && !!prep.period && !isSecondary(prep.id)));
   const old = new Map();
   for (const t of vault.transactions) if (replaced(t) && (t.locked || t.oneOff || t.parts || t.items)) old.set(dupKey(t), t);
   for (const t of prep.transactions) {
@@ -276,8 +299,11 @@ export const filterMode = (mode) => (mode === 'everyday' ? isEveryday : isSpend)
 /** Money in / out / net (cents) for txns whose date is within [from, to]. Netted pairs excluded, so net = balance change. */
 export function flow(model, from, to) {
   let inn = 0, out = 0, n = 0;
+  // With a card and a bank account both here, paying the card shows up on each side; it's neither.
+  const two = model.statements.some((s) => isSecondary(s));
   for (const t of model.txns) {
     if (t.netted || t.date < from || t.date > to) continue;
+    if (two && t.cat?.id === 'own') continue;
     if (t.c > 0) inn += t.c; else out -= t.c;
     n++;
   }
@@ -331,11 +357,13 @@ export function dailyBalance(model) {
 function computeDailyBalance(model) {
   const out = [];
   const byDate = new Map();
-  for (const t of model.txns) byDate.set(t.date, (byDate.get(t.date) || 0) + t.c);
+  // The balance line follows the main account: a credit card's charges don't move the chequing balance.
+  for (const t of model.txns) if (!isSecondary(t.statement)) byDate.set(t.date, (byDate.get(t.date) || 0) + t.c);
   let bal = null;
+  const mains = model.statements.filter((s) => !isSecondary(s));
   // Files without any balance (some CSV exports) still get a line: the running net from zero.
-  out.relative = !model.statements.some((s) => s.opening != null);
-  for (const st of model.statements) {
+  out.relative = !mains.some((s) => s.opening != null);
+  for (const st of mains) {
     if (st.opening == null && !out.relative && !out.length) continue;
     let day = st.start;
     if (out.length && out[out.length - 1].date >= day) day = addDays(out[out.length - 1].date, 1);

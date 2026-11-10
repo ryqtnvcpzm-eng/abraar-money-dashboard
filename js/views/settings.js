@@ -1,6 +1,7 @@
 // Settings: save to GitHub / export, statements & reconciliation, merchant rules, auto-lock, passphrase, device.
 import { app } from '../state.js';
 import { money, monthLabel, dateLabel, esc, plural } from '../format.js';
+import { statementLabel } from '../ledger.js';
 import * as crypto from '../crypto.js';
 import * as store from '../store.js';
 import * as bio from '../biometric.js';
@@ -218,7 +219,7 @@ export function openStatements() {
     sheet.setBody(list.length ? `
       <div class="list" style="margin-top:6px">${list.map((s) => `
         <button class="row tap" data-st="${esc(s.id)}">
-          <span class="main"><span class="title">${esc(monthLabel(s.id))}</span><span class="subtitle">${plural(s.count, 'transaction')}${s.closing != null ? ` · closes at ${money(s.closing)}` : ''}</span></span>
+          <span class="main"><span class="title">${esc(statementLabel(s))}</span><span class="subtitle">${plural(s.count, 'transaction')}${s.closing != null ? ` · closes at ${money(s.closing)}` : ''}</span></span>
           ${s.source === 'sync' ? `<span class="chip">${fromMail(s.id) ? 'Gmail' : 'Synced'}</span>` : statusChip(s.reconciled, 'Check')}${icon('chev-r', 'chev')}
         </button>`).join('')}</div>
       <p class="list-foot">Each statement file is checked: opening + deposits − withdrawals = closing, and both totals match the bank’s summary to the cent. Files without balances (some CSV downloads) can’t be checked. Months marked Gmail or Synced are built from bank emails or bank sync as they come in.</p>`
@@ -234,7 +235,7 @@ export function openStatements() {
 function openStatement(id, onChange) {
   const s = app.vault.statements.find((x) => x.id === id);
   const sheet = openSheet({
-    title: monthLabel(id), size: 'auto',
+    title: statementLabel(id), size: 'auto',
     body: `
       <div class="list-head"><span>${esc(dateLabel(s.start, 'short'))} – ${esc(dateLabel(s.end, 'long'))}</span>${statusChip(s.reconciled, 'Doesn’t match')}</div>
       <div class="list">

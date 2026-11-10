@@ -51,7 +51,7 @@ export const monthOf = (isoDate) => isoDate.slice(0, 7);
 export function addDays(isoDate, n) { const d = parseISO(isoDate); d.setDate(d.getDate() + n); return iso(d); }
 export function daysBetween(a, b) { return Math.round((parseISO(b) - parseISO(a)) / 864e5); }
 export function monthLabel(ym, style = 'long') {
-  const [y, m] = ym.split('-').map(Number);
+  const [y, m] = String(ym).slice(0, 7).split('-').map(Number);
   if (style === 'short') return MONTHS[m - 1];
   if (style === 'shortYear') return `${MONTHS[m - 1]} ${String(y).slice(2)}`;
   if (style === 'month') return MONTHS_LONG[m - 1];
